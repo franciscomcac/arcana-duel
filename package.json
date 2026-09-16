@@ -1,0 +1,41 @@
+{
+  "name": "arcana-duel",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "concurrently -k \"vite --host 0.0.0.0 --port 4173 --strictPort\" \"node --watch server/index.js\"",
+    "dev:web": "vite --host 0.0.0.0 --port 4173 --strictPort",
+    "server": "node server/index.js",
+    "build": "tsc -b && vite build",
+    "test": "vitest run",
+    "start": "node server/index.js",
+    "lint": "eslint ."
+  },
+  "dependencies": {
+    "@supabase/supabase-js": "^2.116.0",
+    "@vitejs/plugin-react": "latest",
+    "express": "latest",
+    "framer-motion": "latest",
+    "lucide-react": "latest",
+    "react": "latest",
+    "react-dom": "latest",
+    "socket.io": "latest",
+    "socket.io-client": "latest",
+    "vite": "latest"
+  },
+  "devDependencies": {
+    "@eslint/js": "latest",
+    "@types/node": "latest",
+    "@types/react": "latest",
+    "@types/react-dom": "latest",
+    "concurrently": "latest",
+    "eslint": "latest",
+    "eslint-plugin-react-hooks": "latest",
+    "eslint-plugin-react-refresh": "latest",
+    "globals": "latest",
+    "typescript": "~5.9.3",
+    "typescript-eslint": "latest",
+    "vitest": "^5.0.0"
+  }
+}
