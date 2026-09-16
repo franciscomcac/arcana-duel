@@ -405,12 +405,14 @@ button:focus-visible { outline: 2px solid var(--gold-bright); outline-offset: 3p
   pointer-events: none;
 }
 
-.mulligan-panel { width: min(1080px, 94vw); position: relative; text-align: center; }
+.mulligan-panel { width: min(1280px, 95vw); position: relative; text-align: center; }
 .mulligan-heading > span { color: #d1b15d; font-size: 11px; font-weight: 700; letter-spacing: .18em; text-transform: uppercase; }
 .mulligan-heading h1 { margin: 9px 0 7px; color: #f0eddf; font: 700 clamp(25px, 3vw, 39px)/1.1 Cinzel, serif; }
 .mulligan-heading p { margin: 0; color: #89968a; font-size: 10px; }
-.mulligan-hand { height: min(340px, 43vh); margin: 34px auto 24px; display: flex; align-items: center; justify-content: center; gap: clamp(7px, 1vw, 14px); }
-.mulligan-card { width: clamp(105px, 11.2vw, 150px); aspect-ratio: 488 / 680; position: relative; flex: none; padding: 0; border: 0; border-radius: 5%; background: #141a15; cursor: pointer; box-shadow: 0 15px 27px rgba(0,0,0,.62), 0 0 0 1px rgba(238,225,182,.18); transform-origin: center bottom; }
+.mulligan-hint { margin: 0 0 6px; color: #6d786e; font-size: 10px; letter-spacing: .04em; }
+.mulligan-hint b { color: #c9b06c; font-weight: 600; }
+.mulligan-hand { height: min(360px, 45vh); margin: 34px auto 10px; display: flex; align-items: center; justify-content: center; gap: clamp(6px, .8vw, 10px); }
+.mulligan-card { width: clamp(128px, 12.8vw, 170px); aspect-ratio: 488 / 680; position: relative; flex: none; padding: 0; border: 0; border-radius: 5%; background: #141a15; cursor: pointer; box-shadow: 0 15px 27px rgba(0,0,0,.62), 0 0 0 1px rgba(238,225,182,.18); transform-origin: center bottom; image-rendering: -webkit-optimize-contrast; }
 .mulligan-card img { display: block; width: 100%; height: 100%; border-radius: inherit; object-fit: cover; }
 .mulligan-card.chosen { box-shadow: 0 0 0 3px #d1ae59, 0 0 30px rgba(216,174,71,.52), 0 17px 30px rgba(0,0,0,.7); filter: saturate(.65) brightness(.72); }
 .mulligan-card > span { position: absolute; z-index: 2; left: 50%; top: 50%; transform: translate(-50%, -50%); padding: 7px 11px; border: 1px solid #f0d281; background: rgba(12,15,11,.92); color: #f1d787; font-size: 11px; font-weight: 700; text-transform: uppercase; }

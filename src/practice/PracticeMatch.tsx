@@ -1069,18 +1069,19 @@ export function PracticeMatch({ onExit, deck }: { onExit: () => void; deck: Save
                 <h1>{pregame === 'review' ? 'Keep or mulligan?' : `Put ${mulliganCount} on the bottom`}</h1>
                 <p>{pregame === 'review' ? `${deck.name} · ${deck.format} · You play first and skip your first draw step.` : `Select exactly ${mulliganCount} card${mulliganCount === 1 ? '' : 's'} from your hand.`}</p>
               </div>
+              <p className="mulligan-hint">Click any card to read it up close, or hover to see it larger.</p>
               <div className="mulligan-hand">
                 {sortedHand.map((card, index) => (
                   <motion.button
                     type="button"
                     key={card.uid}
                     className={`mulligan-card ${bottomSelection.has(card.uid) ? 'chosen' : ''}`}
-                    onClick={() => pregame === 'bottom' ? toggleBottomCard(card.uid) : setInspectedId(card.uid)}
+                    onClick={() => pregame === 'bottom' ? toggleBottomCard(card.uid) : setZoomed(card)}
                     onDoubleClick={() => setZoomed(card)}
                     initial={{ opacity: 0, y: 55, rotate: (index - 3) * 2 }}
                     animate={{ opacity: 1, y: bottomSelection.has(card.uid) ? 17 : 0, rotate: (index - 3) * 1.2 }}
                     transition={{ type: 'spring', stiffness: 270, damping: 24, delay: index * .045 }}
-                    whileHover={{ y: -17, scale: 1.06, zIndex: 10 }}
+                    whileHover={{ y: -22, scale: 1.16, zIndex: 10 }}
                   >
                     <img src={card.image} alt={card.name} />
                     {bottomSelection.has(card.uid) && <span>Bottom</span>}
