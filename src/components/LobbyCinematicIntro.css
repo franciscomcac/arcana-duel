@@ -108,24 +108,12 @@
 
 .lobby-intro__halo-ring {
   position: absolute;
-  inset: 0;
+  inset: 14%;
   display: block;
-  border: 1px solid rgba(217, 184, 108, 0.5);
+  border: 1px solid rgba(217, 184, 108, 0.4);
   border-radius: 50%;
-}
-
-.lobby-intro__halo-ring--outer {
-  inset: 2%;
-  border-style: dashed;
-  border-color: rgba(217, 184, 108, 0.38);
-  animation: lobby-orbit 20s linear infinite;
-}
-
-.lobby-intro__halo-ring--inner {
-  inset: 18%;
-  border-color: rgba(132, 189, 149, 0.3);
-  box-shadow: inset 0 0 30px rgba(217, 184, 108, 0.1), 0 0 34px rgba(217, 184, 108, 0.1);
-  animation: lobby-orbit-reverse 15s linear infinite;
+  box-shadow: inset 0 0 30px rgba(217, 184, 108, 0.1), 0 0 24px rgba(217, 184, 108, 0.08);
+  animation: lobby-ring-pulse 4.5s ease-in-out infinite;
 }
 
 .lobby-intro__glyph {
@@ -153,35 +141,16 @@
   display: block;
   width: 116px;
   height: 164px;
+  object-fit: cover;
   border: 1px solid rgba(230, 213, 164, 0.68);
   border-radius: 8px;
-  background:
-    linear-gradient(145deg, rgba(234, 213, 153, 0.9), transparent 18%),
-    radial-gradient(circle at 48% 42%, rgba(133, 190, 136, 0.75), transparent 24%),
-    linear-gradient(160deg, #203d2b, #15241c 56%, #101712);
-  box-shadow: 0 22px 38px rgba(0, 0, 0, 0.45), inset 0 0 0 4px rgba(6, 12, 9, 0.52);
+  box-shadow: 0 22px 38px rgba(0, 0, 0, 0.45);
   transform-origin: 50% 90%;
 }
-
-.lobby-intro__card::before,
-.lobby-intro__card::after {
-  content: '';
-  position: absolute;
-  left: 10px;
-  right: 10px;
-  border: 1px solid rgba(239, 223, 176, 0.35);
-}
-
-.lobby-intro__card::before { top: 10px; height: 72px; }
-.lobby-intro__card::after { bottom: 12px; height: 37px; }
 
 .lobby-intro__card--center {
   z-index: 2;
   transform: translateX(-50%) rotate(-2deg);
-  background:
-    linear-gradient(145deg, rgba(245, 220, 145, 0.9), transparent 17%),
-    radial-gradient(circle at 50% 35%, rgba(204, 133, 74, 0.82), transparent 25%),
-    linear-gradient(160deg, #3b2819, #2e241a 58%, #161411);
 }
 
 .lobby-intro__card--left { transform: translateX(-92%) rotate(-17deg); opacity: 0.84; }
@@ -262,8 +231,10 @@
   50% { opacity: 0.95; transform: translate3d(10px, -20px, 0) scale(1.15); }
 }
 
-@keyframes lobby-orbit { to { transform: rotate(360deg); } }
-@keyframes lobby-orbit-reverse { to { transform: rotate(-360deg); } }
+@keyframes lobby-ring-pulse {
+  0%, 100% { opacity: 0.7; }
+  50% { opacity: 1; }
+}
 @keyframes lobby-glyph-pulse {
   0%, 100% { opacity: 0.72; transform: scale(0.94); }
   50% { opacity: 1; transform: scale(1.08); }

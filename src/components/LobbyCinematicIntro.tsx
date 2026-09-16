@@ -9,14 +9,14 @@ type LobbyCinematicIntroProps = {
   onSkip?: () => void;
 };
 
-const INTRO_DURATION = 5200;
+const INTRO_DURATION = 4200;
 
 export function LobbyCinematicIntro({ active = true, onComplete, onSkip }: LobbyCinematicIntroProps) {
   const prefersReducedMotion = useReducedMotion();
   const [visible, setVisible] = useState(active);
   const particles = useMemo(
     () =>
-      Array.from({ length: 24 }, (_, index) => ({
+      Array.from({ length: 10 }, (_, index) => ({
         id: index,
         left: `${(index * 37 + 9) % 100}%`,
         top: `${(index * 61 + 17) % 100}%`,
@@ -82,13 +82,12 @@ export function LobbyCinematicIntro({ active = true, onComplete, onSkip }: Lobby
           <div className="lobby-intro__stage">
             <motion.div
               className="lobby-intro__halo"
-              initial={prefersReducedMotion ? false : { opacity: 0, scale: 0.55, rotate: -18 }}
-              animate={{ opacity: 1, scale: 1, rotate: 0 }}
-              transition={{ duration: 1.3, ease: [0.16, 1, 0.3, 1] }}
+              initial={prefersReducedMotion ? false : { opacity: 0, scale: 0.8 }}
+              animate={{ opacity: 1, scale: 1 }}
+              transition={{ duration: 0.9, ease: 'easeOut' }}
               aria-hidden="true"
             >
-              <span className="lobby-intro__halo-ring lobby-intro__halo-ring--outer" />
-              <span className="lobby-intro__halo-ring lobby-intro__halo-ring--inner" />
+              <span className="lobby-intro__halo-ring" />
               <span className="lobby-intro__glyph"><Sparkles size={26} strokeWidth={1.35} /></span>
             </motion.div>
 
@@ -96,19 +95,31 @@ export function LobbyCinematicIntro({ active = true, onComplete, onSkip }: Lobby
               className="lobby-intro__cards"
               initial={prefersReducedMotion ? false : { opacity: 0, y: 36, scale: 0.8 }}
               animate={{ opacity: 1, y: 0, scale: 1 }}
-              transition={{ delay: 0.45, duration: 1.2, ease: [0.16, 1, 0.3, 1] }}
+              transition={{ delay: 0.3, duration: 0.7, ease: 'easeOut' }}
               aria-hidden="true"
             >
-              <span className="lobby-intro__card lobby-intro__card--left" />
-              <span className="lobby-intro__card lobby-intro__card--center" />
-              <span className="lobby-intro__card lobby-intro__card--right" />
+              <img
+                className="lobby-intro__card lobby-intro__card--left"
+                src="/cards/questing-beast.jpg"
+                alt=""
+              />
+              <img
+                className="lobby-intro__card lobby-intro__card--center"
+                src="/cards/embercleave.jpg"
+                alt=""
+              />
+              <img
+                className="lobby-intro__card lobby-intro__card--right"
+                src="/cards/lightning-bolt.jpg"
+                alt=""
+              />
             </motion.div>
 
             <motion.div
               className="lobby-intro__copy"
               initial={prefersReducedMotion ? false : { opacity: 0, y: 22 }}
               animate={{ opacity: 1, y: 0 }}
-              transition={{ delay: 1.05, duration: 0.8, ease: 'easeOut' }}
+              transition={{ delay: 0.75, duration: 0.6, ease: 'easeOut' }}
             >
               <div className="lobby-intro__eyebrow"><Swords size={13} aria-hidden="true" /> LIVE ARENA</div>
               <h1>Arcana Duel</h1>
@@ -122,7 +133,7 @@ export function LobbyCinematicIntro({ active = true, onComplete, onSkip }: Lobby
             className="lobby-intro__footer"
             initial={prefersReducedMotion ? false : { opacity: 0 }}
             animate={{ opacity: 1 }}
-            transition={{ delay: 1.9, duration: 0.8 }}
+            transition={{ delay: 1.3, duration: 0.6 }}
           >
             <span>PLANESWALKER NETWORK</span>
             <span className="lobby-intro__footer-dot" aria-hidden="true" />

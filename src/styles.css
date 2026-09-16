@@ -253,7 +253,7 @@ button:focus-visible { outline: 2px solid var(--gold-bright); outline-offset: 3p
 .game-card.mana-ready:not(.eligible):hover { box-shadow: 0 10px 20px rgba(0,0,0,.68), 0 0 0 2px rgba(188,224,158,.68), 0 0 22px rgba(121,180,96,.28); }
 .game-card.disabled { filter: saturate(.34) brightness(.68); }
 .game-card.disabled:hover, .game-card.disabled:focus-visible { filter: saturate(.62) brightness(.84); }
-.game-card.tapped { z-index: 1; }
+.game-card.tapped { z-index: 1; transform: rotate(90deg); transition: transform var(--motion-medium) var(--ease-out); }
 .game-card.attacking { z-index: 8; box-shadow: 0 0 0 2px #e5c16e, 0 0 28px rgba(235,126,61,.75); }
 @keyframes eligible-breathe { 50% { box-shadow: 0 0 0 3px #d1efa9, 0 0 30px rgba(121,205,104,.72), 0 10px 18px rgba(0,0,0,.62); } }
 .mana-badge, .stat-badge, .sick-badge, .buff-badge, .attack-marker { position: absolute; z-index: 5; display: flex; align-items: center; justify-content: center; box-shadow: 0 2px 7px rgba(0,0,0,.7); }
