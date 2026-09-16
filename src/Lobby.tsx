@@ -12,8 +12,6 @@ import {
   Plus,
   Radio,
   Search,
-  ShieldCheck,
-  Sparkles,
   Swords,
   UserRound,
   UsersRound,
@@ -239,7 +237,7 @@ export function Lobby({ decks, onEditDeck, onPractice, onMatch }: LobbyProps) {
 
         <div className="rooms-head">
           <div><h2>Open tables</h2><span>{visibleRooms.length} available</span></div>
-          <div><label><Search /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search tables" /></label><button type="button" className="new-room" onClick={() => setCreating(true)}><Plus /> New table</button></div>
+          <div><label><Search /><input aria-label="Search tables" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search tables" /></label><button type="button" className="new-room" onClick={() => setCreating(true)}><Plus /> New table</button></div>
         </div>
 
         <div className="room-table">

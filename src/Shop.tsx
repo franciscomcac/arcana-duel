@@ -14,7 +14,7 @@ export function Shop() {
         <span><Sparkles /> Coming soon</span>
         <h1>The Arcana Shop</h1>
         <p>Cosmetic playmats, sleeves, avatars, and match effects are being prepared. Cards remain available through the deck builder; there are no booster packs or pay-to-win card unlocks.</p>
-        <button type="button" disabled><Bell /> Notify me at launch</button>
+        <span className="shop-badge"><Bell /> Coming soon</span>
         <small><ShieldCheck /> Gameplay cards will not be sold through randomized packs.</small>
       </div>
     </motion.main>

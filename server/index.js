@@ -46,11 +46,16 @@ function broadcastLobby() {
 
 function hydrateDeck(deck) {
   const ids = Array.isArray(deck) && deck.length ? deck : fallbackDeck
-  return ids.map((item, index) => {
-    const source = typeof item === 'string' ? (catalog[item] || catalog.forest) : item
-    const id = source.id || 'card'
-    return { ...source, uid: `${id}-${index}-${Math.random().toString(36).slice(2, 7)}`, tapped: false }
+  const hydrated = []
+  ids.forEach((item) => {
+    // Never trust a client-supplied card object's stats directly: always resolve against the
+    // server's catalog by id, and silently drop anything that doesn't resolve to a known card.
+    const catalogId = typeof item === 'string' ? item : (item && typeof item === 'object' ? item.id : undefined)
+    const source = typeof catalogId === 'string' ? catalog[catalogId] : undefined
+    if (!source) return
+    hydrated.push({ ...source, uid: `${source.id}-${hydrated.length}-${Math.random().toString(36).slice(2, 7)}`, tapped: false })
   })
+  return hydrated.length ? hydrated : hydrateDeck(fallbackDeck)
 }
 
 function makeState(room) {
@@ -87,6 +92,8 @@ function leaveCurrentRoom(socket) {
   const room = rooms.get(roomId)
   if (room) {
     room.players = room.players.filter((player) => player.id !== socket.id)
+    // Prune the room once nobody is left connected to it, whether it finished, was abandoned
+    // mid-match, or never got a second player.
     if (!room.players.length) rooms.delete(roomId)
     else io.to(roomId).emit('room:update', room)
   }
@@ -115,15 +122,22 @@ io.on('connection', (socket) => {
   })
 
   socket.on('room:join', (payload, reply) => {
-    const room = rooms.get(payload.roomId)
-    if (!room || room.status !== 'waiting' || room.players.length >= 2) return reply?.({ ok: false, error: 'This room is no longer available.' })
-    leaveCurrentRoom(socket)
-    room.players.push({ id: socket.id, name: payload.playerName || 'Planeswalker', deckName: payload.deckName || 'Starter Deck', deck: payload.deck || fallbackDeck, ready: false })
-    socket.join(room.id)
-    socket.data.roomId = room.id
-    reply?.({ ok: true, room })
-    io.to(room.id).emit('room:update', room)
-    broadcastLobby()
+    try {
+      const safePayload = payload && typeof payload === 'object' ? payload : {}
+      const room = typeof safePayload.roomId === 'string' ? rooms.get(safePayload.roomId) : undefined
+      if (!room || room.status !== 'waiting' || room.players.length >= 2) return reply?.({ ok: false, error: 'This room is no longer available.' })
+      leaveCurrentRoom(socket)
+      room.players.push({ id: socket.id, name: safePayload.playerName || 'Planeswalker', deckName: safePayload.deckName || 'Starter Deck', deck: safePayload.deck || fallbackDeck, ready: false })
+      socket.join(room.id)
+      socket.data.roomId = room.id
+      reply?.({ ok: true, room })
+      io.to(room.id).emit('room:update', room)
+      broadcastLobby()
+    } catch (error) {
+      console.error('room:join failed', error)
+      reply?.({ ok: false, error: 'Could not join that room.' })
+      socket.emit('error:message', { scope: 'room:join', error: 'Could not join that room.' })
+    }
   })
 
   socket.on('room:ready', () => {
@@ -164,23 +178,40 @@ io.on('connection', (socket) => {
     if (room?.state) socket.emit('match:state', room.state)
   })
 
-  socket.on('match:action', ({ roomId, type, payload }) => {
-    const room = rooms.get(roomId)
-    const state = room?.state
-    if (!state) return
-    const playerIndex = state.players.findIndex((player) => player.id === socket.id)
-    if (playerIndex < 0) return
-    const result = applyRemoteMatchAction(state, playerIndex, type, payload)
-    if (!result.accepted) return
-    room.state = result.state
-    if (result.state.winner !== undefined || result.state.draw) room.status = 'complete'
-    io.to(roomId).emit('match:state', result.state)
+  socket.on('match:action', (message) => {
+    try {
+      const safeMessage = message && typeof message === 'object' ? message : {}
+      const { roomId, type, payload } = safeMessage
+      if (typeof roomId !== 'string' || typeof type !== 'string') return
+      const room = rooms.get(roomId)
+      const state = room?.state
+      if (!state) return
+      const playerIndex = state.players.findIndex((player) => player.id === socket.id)
+      if (playerIndex < 0) return
+      const result = applyRemoteMatchAction(state, playerIndex, type, payload)
+      if (!result.accepted) return
+      room.state = result.state
+      if (result.state.winner !== undefined || result.state.draw) room.status = 'complete'
+      io.to(roomId).emit('match:state', result.state)
+    } catch (error) {
+      console.error('match:action failed', error)
+      socket.emit('error:message', { scope: 'match:action', error: 'That action could not be applied.' })
+    }
   })
 
-  socket.on('match:chat', ({ roomId, text }) => {
-    const room = rooms.get(roomId)
-    const player = room?.players.find((item) => item.id === socket.id)
-    if (room && player && String(text).trim()) io.to(roomId).emit('match:chat', { id: Date.now(), player: player.name, text: String(text).trim().slice(0, 240) })
+  socket.on('match:chat', (message) => {
+    try {
+      const safeMessage = message && typeof message === 'object' ? message : {}
+      const { roomId, text } = safeMessage
+      if (typeof roomId !== 'string') return
+      const room = rooms.get(roomId)
+      const player = room?.players.find((item) => item.id === socket.id)
+      const trimmed = typeof text === 'string' ? text.trim() : ''
+      if (room && player && trimmed) io.to(roomId).emit('match:chat', { id: Date.now(), player: player.name, text: trimmed.slice(0, 240) })
+    } catch (error) {
+      console.error('match:chat failed', error)
+      socket.emit('error:message', { scope: 'match:chat', error: 'That message could not be sent.' })
+    }
   })
 
   socket.on('disconnect', () => {

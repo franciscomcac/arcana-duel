@@ -2,6 +2,11 @@ export const MATCH_PHASES = ['untap', 'upkeep', 'draw', 'main1', 'begin_combat',
 
 const clone = (state) => structuredClone(state)
 const reject = (state, error) => ({ state, accepted: false, error })
+const MAX_LOG_ENTRIES = 100
+function pushLog(state, text) {
+  state.log.push({ id: Date.now(), text })
+  if (state.log.length > MAX_LOG_ENTRIES) state.log.splice(0, state.log.length - MAX_LOG_ENTRIES)
+}
 
 function isPermanent(card) {
   return ['land', 'creature', 'artifact', 'enchantment', 'planeswalker', 'battle'].includes(card.kind)
@@ -19,7 +24,7 @@ function resolveTop(state) {
     if (damage > 0) opponent.life = Math.max(0, opponent.life - damage)
     controller.graveyard.push(card)
   }
-  state.log.push({ id: Date.now(), text: `${card.name} resolved.` })
+  pushLog(state, `${card.name} resolved.`)
 }
 
 function enterNextPhase(state) {
@@ -39,7 +44,7 @@ function enterNextPhase(state) {
     if (drawn) active.hand.push(drawn)
   }
   state.priorityPlayer = state.activePlayer
-  state.log.push({ id: Date.now(), text: `Turn ${state.turn}: ${state.phase.replaceAll('_', ' ')}.` })
+  pushLog(state, `Turn ${state.turn}: ${state.phase.replaceAll('_', ' ')}.`)
 }
 
 function finishIfLethal(state) {
@@ -49,6 +54,7 @@ function finishIfLethal(state) {
 }
 
 export function applyRemoteMatchAction(currentState, playerIndex, type, payload = {}) {
+  payload = payload && typeof payload === 'object' ? payload : {}
   const sourcePlayer = currentState.players[playerIndex]
   if (!sourcePlayer || currentState.winner !== undefined || currentState.draw) return reject(currentState, 'The match is over.')
   const state = clone(currentState)
@@ -70,10 +76,10 @@ export function applyRemoteMatchAction(currentState, playerIndex, type, payload 
     if (card.kind === 'land') {
       player.battlefield.push(card)
       player.landsPlayedThisTurn += 1
-      state.log.push({ id: Date.now(), text: `${player.name} played ${card.name}.` })
+      pushLog(state, `${player.name} played ${card.name}.`)
     } else {
       state.stack.push({ id: `stack-${state.turn}-${Date.now()}-${state.stack.length}`, controller: playerIndex, card })
-      state.log.push({ id: Date.now(), text: `${player.name} cast ${card.name}.` })
+      pushLog(state, `${player.name} cast ${card.name}.`)
     }
     state.consecutivePasses = 0
   } else if (type === 'tap') {
@@ -86,7 +92,7 @@ export function applyRemoteMatchAction(currentState, playerIndex, type, payload 
   } else if (type === 'pass') {
     if (state.priorityPlayer !== playerIndex) return reject(currentState, 'That player does not have priority.')
     state.consecutivePasses += 1
-    state.log.push({ id: Date.now(), text: `${player.name} passed priority.` })
+    pushLog(state, `${player.name} passed priority.`)
     if (state.consecutivePasses >= state.players.length) {
       state.consecutivePasses = 0
       if (state.stack.length) resolveTop(state)
@@ -102,7 +108,7 @@ export function applyRemoteMatchAction(currentState, playerIndex, type, payload 
     state.phase = 'untap'
     opponent.landsPlayedThisTurn = 0
     opponent.battlefield = opponent.battlefield.map((card) => ({ ...card, tapped: false }))
-    state.log.push({ id: Date.now(), text: `${opponent.name} begins turn ${state.turn}.` })
+    pushLog(state, `${opponent.name} begins turn ${state.turn}.`)
   } else return reject(currentState, 'Unknown match action.')
 
   finishIfLethal(state)

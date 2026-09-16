@@ -92,7 +92,8 @@ export function subscribeToMatch(
 }
 
 export async function broadcastMatchChat(channel: RealtimeChannel, message: MatchChatPayload) {
-  const status = await channel.send({ type: 'broadcast', event: 'match_chat', payload: message })
+  const cappedMessage = { ...message, text: message.text.slice(0, 240) }
+  const status = await channel.send({ type: 'broadcast', event: 'match_chat', payload: cappedMessage })
   if (status !== 'ok') throw new Error(`Realtime chat failed: ${status}`)
 }
 
@@ -101,26 +102,3 @@ export async function broadcastMatchEvent(channel: RealtimeChannel, event: Match
   if (status !== 'ok') throw new Error(`Realtime broadcast failed: ${status}`)
 }
 
-export async function applyMatchEvent(
-  matchId: string,
-  expectedVersion: number,
-  eventType: MatchEventType,
-  payload: Record<string, unknown>,
-  update: MatchUpdate = {},
-): Promise<MatchSnapshot> {
-  const client = requireSupabase()
-  const { data, error } = await client.rpc('apply_match_event', {
-    p_match_id: matchId,
-    p_expected_version: expectedVersion,
-    p_event_type: eventType,
-    p_payload: payload,
-    p_next_phase: update.phase ?? null,
-    p_next_active_player: update.active_player ?? null,
-    p_next_priority_player: update.priority_player ?? null,
-    p_stack: update.stack ?? null,
-    p_battlefield_state: update.battlefield_state ?? null,
-    p_life_totals: update.life_totals ?? null,
-  })
-  if (error) throw error
-  return data as MatchSnapshot
-}

@@ -172,13 +172,15 @@ function moveCard(state: GameState, cardId: CardInstanceId, destinationPlayerId:
   return true
 }
 
-function drawCards(state: GameState, playerId: PlayerId, amount: number): void {
+function drawCards(state: GameState, playerId: PlayerId, amount: number, isOpeningDraw = false): void {
   const player = state.players[playerId]
   for (let count = 0; count < amount; count += 1) {
     const cardId = player.zones.library.shift()
     if (!cardId) {
-      player.lost = true
-      addEvent(state, 'empty_draw', `${player.name} tried to draw from an empty library.`, { playerId })
+      if (!isOpeningDraw) {
+        player.lost = true
+        addEvent(state, 'empty_draw', `${player.name} tried to draw from an empty library.`, { playerId })
+      }
       return
     }
     player.zones.hand.push(cardId)
@@ -236,9 +238,17 @@ export function createGame(options: CreateGameOptions): GameState {
       zones.library.push(instanceId)
     })
   }
-  for (const playerId of ids) drawCards(state, playerId, openingHandSize)
+  for (const playerId of ids) drawCards(state, playerId, openingHandSize, true)
   addEvent(state, 'game_start', `${players[startingPlayerId].name} takes the first turn.`, { playerId: startingPlayerId })
   return runStateBasedActions(state)
+}
+
+/** Best-effort type line for cards that don't specify one explicitly, so "controls a [subtype]" checks work generally. */
+function deriveTypeLine(definition: CardDefinition): string {
+  if (definition.typeLine) return definition.typeLine
+  const superTypes = definition.types.map((type) => type.charAt(0).toUpperCase() + type.slice(1)).join(' ')
+  // Basic lands (and many simple permanents) use the card name as their subtype.
+  return superTypes ? `${superTypes} - ${definition.name}` : definition.name
 }
 
 function makeInstance(
@@ -251,6 +261,7 @@ function makeInstance(
   return {
     ...definition,
     types: [...definition.types],
+    typeLine: deriveTypeLine(definition),
     keywords: [...(definition.keywords ?? [])],
     producesMana: definition.producesMana ? { ...definition.producesMana } : undefined,
     effects: definition.effects?.map(cloneEffect),
@@ -301,7 +312,9 @@ export function refreshContinuousEffects(state: GameState): void {
     const requiredType = match[3].trim().toLocaleLowerCase()
     const controlsRequired = state.players[card.controllerId]?.zones.battlefield.some((id) => {
       const permanent = state.cards[id]
-      return permanent?.typeLine?.toLocaleLowerCase().includes(requiredType)
+      if (!permanent) return false
+      const haystack = `${permanent.typeLine ?? ''} ${permanent.name}`.toLocaleLowerCase()
+      return haystack.includes(requiredType)
     }) ?? false
     const powerBonus = Number(match[1])
     const toughnessBonus = Number(match[2])

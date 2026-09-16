@@ -503,7 +503,7 @@ export function DeckBuilder({ decks, setDecks, syncStatus = 'local', initialDeck
 
       <section className="catalog-workspace">
         <div className="catalog-tools">
-          <label className={`search-field ${searching ? 'is-searching' : ''}`}><Search size={16} /><input ref={searchInput} value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Name, oracle text, type, or Scryfall query" />{searching ? <i /> : <kbd>/</kbd>}</label>
+          <label className={`search-field ${searching ? 'is-searching' : ''}`}><Search size={16} /><input aria-label="Search cards" ref={searchInput} value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Name, oracle text, type, or Scryfall query" />{searching ? <i /> : <kbd>/</kbd>}</label>
           <div className="filter-group" aria-label="Color filter">
             {['all', 'white', 'blue', 'black', 'red', 'green', 'gold'].map((item) => <button type="button" key={item} className={color === item ? 'active' : ''} onClick={() => setColor(item)} title={`${item} cards`}><span className={`filter-pip ${item}`} />{item === 'all' ? 'All colors' : item}</button>)}
           </div>
