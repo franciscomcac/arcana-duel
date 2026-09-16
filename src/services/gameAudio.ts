@@ -103,7 +103,6 @@ export function soundForGameEvent(type: string): SoundEvent | null {
   if (type === 'blockers') return 'block'
   if (type === 'combat_damage' || type === 'first_strike_damage') return 'impact'
   if (type === 'creature_died') return 'death'
-  if (type === 'phase') return 'turn'
   if (type === 'player_lost') return 'defeat'
   return null
 }

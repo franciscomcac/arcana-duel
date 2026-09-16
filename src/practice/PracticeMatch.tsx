@@ -13,7 +13,6 @@ import {
   Leaf,
   Menu,
   MessageCircle,
-  RotateCcw,
   Settings,
   Shield,
   Sparkles,
@@ -31,7 +30,6 @@ import {
   gameReducer,
   getManaProduction,
   getPhaseLabel,
-  PHASES,
   type CardInstanceId,
   type GameAction,
   type GameState,
@@ -60,14 +58,6 @@ import {
 import { HAND_SORT_OPTIONS, isHandSortMode, sortHand, type HandSortMode } from './handSorting'
 
 const HAND_SORT_STORAGE_KEY = 'arcana.practice.hand-sort'
-
-const TURN_STAGES = [
-  { label: 'Beginning', phases: ['untap', 'upkeep', 'draw'], icon: 'beginning' },
-  { label: 'First main', phases: ['main1'], icon: 'main' },
-  { label: 'Combat', phases: ['begin_combat', 'declare_attackers', 'declare_blockers', 'combat_damage', 'end_combat'], icon: 'combat' },
-  { label: 'Second main', phases: ['main2'], icon: 'main' },
-  { label: 'Ending', phases: ['end', 'cleanup'], icon: 'ending' },
-] as const
 
 const AUTO_SKIP_PASS_PHASES = new Set([
   'untap',
@@ -210,13 +200,14 @@ function organizeLandPiles(cards: CardData[]): CardData[][] {
   }, [])
 }
 
-function PlayerBadge({ opponent = false, life, active, targetable, onTarget }: { opponent?: boolean; life: number; active: boolean; targetable?: boolean; onTarget?: () => void }) {
+function PlayerBadge({ opponent = false, life, active, targetable, onTarget, onHover }: { opponent?: boolean; life: number; active: boolean; targetable?: boolean; onTarget?: () => void; onHover?: () => void }) {
   const reduceMotion = useReducedMotion()
   return (
     <motion.button
       type="button"
       data-player-id={opponent ? BOT_PLAYER_ID : HUMAN_PLAYER_ID}
       onClick={onTarget}
+      onMouseEnter={onHover}
       disabled={!targetable}
       className={`player-badge ${opponent ? 'opponent' : 'self'} ${active ? 'active' : ''} ${targetable ? 'targetable' : ''}`}
       animate={!reduceMotion && targetable ? { scale: [1, 1.025, 1] } : { scale: 1 }}
@@ -315,6 +306,10 @@ export function PracticeMatch({ onExit, deck }: { onExit: () => void; deck: Save
   const previousLife = useRef({ human: 20, bot: 20 })
   const audio = useRef(new GameAudio())
   const lastSoundEvent = useRef(game.eventSequence)
+  const hoverPauseUntilRef = useRef(0)
+  const [announcements, setAnnouncements] = useState<Array<{ id: number; card: CardData }>>([])
+  const previousStackIds = useRef(new Set<string>())
+  const announcementIdRef = useRef(0)
 
   const hand = useMemo(() => zoneCards(game, HUMAN_PLAYER_ID, 'hand'), [game])
   const sortedHand = useMemo(() => sortHand(hand, handSort), [hand, handSort])
@@ -416,6 +411,10 @@ export function PracticeMatch({ onExit, deck }: { onExit: () => void; deck: Save
     return { title: playerTurn ? `Your ${getPhaseLabel(game.phase)}` : `Opponent ${getPhaseLabel(game.phase)}`, detail: 'You have priority' }
   })()
 
+  const pauseAutoFlow = useCallback(() => {
+    hoverPauseUntilRef.current = Date.now() + 5000
+  }, [])
+
   const dispatch = useCallback((action: GameAction): boolean => {
     const result = gameReducer(game, action)
     if (!result.accepted) {
@@ -457,6 +456,30 @@ export function PracticeMatch({ onExit, deck }: { onExit: () => void; deck: Save
       if (sound) window.setTimeout(() => audio.current.play(sound), index * 55)
     })
   }, [game.eventSequence, game.events, soundOn])
+
+  // Announce newly cast spells (stack pushes) with a prominent, temporary overlay so
+  // fast casts are actually visible. Purely presentational - never delays game logic.
+  useEffect(() => {
+    const currentIds = new Set(game.stack.map((item) => item.id))
+    const previousIds = previousStackIds.current
+    const newItems = game.stack.filter((item) => !previousIds.has(item.id))
+    previousStackIds.current = currentIds
+    if (!newItems.length) return
+    setAnnouncements((queue) => [
+      ...queue,
+      ...newItems.map((item) => ({ id: announcementIdRef.current++, card: engineCardToView(game.cards[item.sourceId]) })),
+    ])
+  }, [game.stack])
+
+  const activeAnnouncement = announcements[0] ?? null
+
+  useEffect(() => {
+    if (!activeAnnouncement) return
+    const timeout = window.setTimeout(() => {
+      setAnnouncements((queue) => queue.slice(1))
+    }, 3000)
+    return () => window.clearTimeout(timeout)
+  }, [activeAnnouncement])
 
   useEffect(() => {
     if (selectedId && !handCardAvailability(selectedId).playable) setSelectedId(null)
@@ -508,57 +531,73 @@ export function PracticeMatch({ onExit, deck }: { onExit: () => void; deck: Save
     }
   }, [game, pregame])
 
-  const hasInstantResponse = useMemo(() => {
-    if (!playerHasPriority) return false
-    return game.players[HUMAN_PLAYER_ID].zones.hand.some((cardId) => {
-      const card = game.cards[cardId]
-      const instantTiming = card.types.includes('instant') || (card.keywords ?? []).includes('flash')
-      return instantTiming && findManaActions(game, HUMAN_PLAYER_ID, card.manaCost) !== null
-    })
-  }, [game, playerHasPriority])
+  // A meaningful reason for auto-pass to stop and hand control back to the player:
+  // merely holding a castable instant is NOT one (see hasInstantResponse's old usage) -
+  // only an actual response opportunity (something on the stack) or a live combat-trick
+  // window counts.
+  // something is actually on the stack to respond to, or we're in a live combat-trick window.
+  const shouldPauseForDecision = game.stack.length > 0
+    || game.phase === 'declare_attackers'
+    || game.phase === 'declare_blockers'
+    || game.phase === 'combat_damage'
+
+  const scheduleAutoAction = useCallback((run: () => void, delay: number): (() => void) => {
+    let cancelled = false
+    let timeoutId = 0
+    const fire = () => {
+      if (cancelled) return
+      const remaining = hoverPauseUntilRef.current - Date.now()
+      if (remaining > 0) {
+        timeoutId = window.setTimeout(fire, remaining)
+        return
+      }
+      run()
+    }
+    timeoutId = window.setTimeout(fire, delay)
+    return () => {
+      cancelled = true
+      window.clearTimeout(timeoutId)
+    }
+  }, [])
 
   useEffect(() => {
     const mustBlock = game.phase === 'declare_blockers'
       && game.combat.defendingPlayerId === HUMAN_PLAYER_ID
       && !game.combat.blockersDeclared
-    if (!autoPass || pregame !== 'done' || playerTurn || !playerHasPriority || hasInstantResponse || mustBlock || targetingId) return
-    const timeout = window.setTimeout(() => {
+    if (!autoPass || pregame !== 'done' || playerTurn || !playerHasPriority || shouldPauseForDecision || mustBlock || targetingId) return
+    return scheduleAutoAction(() => {
       const result = gameReducer(game, { type: 'PASS_PRIORITY', playerId: HUMAN_PLAYER_ID })
       if (result.accepted) setGame(result.state)
     }, 520)
-    return () => window.clearTimeout(timeout)
-  }, [autoPass, game, hasInstantResponse, playerHasPriority, playerTurn, pregame, targetingId])
+  }, [autoPass, game, playerHasPriority, playerTurn, pregame, scheduleAutoAction, shouldPauseForDecision, targetingId])
 
   // Move through mandatory steps when the player has no meaningful decision.
   useEffect(() => {
     if (!autoPass || pregame !== 'done' || botThinking || targetingId || !playerTurn || !playerHasPriority) return
-    if (game.stack.length > 0 || hasInstantResponse || !AUTO_SKIP_PASS_PHASES.has(game.phase)) return
-    const timeout = window.setTimeout(() => {
+    if (shouldPauseForDecision || !AUTO_SKIP_PASS_PHASES.has(game.phase)) return
+    return scheduleAutoAction(() => {
       const result = gameReducer(game, { type: 'PASS_PRIORITY', playerId: HUMAN_PLAYER_ID })
       if (result.accepted) setGame(result.state)
     }, 360)
-    return () => window.clearTimeout(timeout)
-  }, [autoPass, botThinking, game, hasInstantResponse, playerHasPriority, playerTurn, pregame, targetingId])
+  }, [autoPass, botThinking, game, playerHasPriority, playerTurn, pregame, scheduleAutoAction, shouldPauseForDecision, targetingId])
 
   // Skip combat decisions that cannot produce a different game state.
   useEffect(() => {
     if (!autoPass || pregame !== 'done' || botThinking || targetingId) return
     if (game.phase === 'declare_attackers' && playerTurn && !game.combat.attackersDeclared && legalAttackerIds.size === 0) {
-      const timeout = window.setTimeout(() => {
+      return scheduleAutoAction(() => {
         const result = gameReducer(game, { type: 'DECLARE_ATTACKERS', playerId: HUMAN_PLAYER_ID, attackerIds: [] })
         if (result.accepted) setGame(result.state)
       }, 320)
-      return () => window.clearTimeout(timeout)
     }
     if (game.phase === 'declare_blockers' && game.combat.defendingPlayerId === HUMAN_PLAYER_ID && !game.combat.blockersDeclared && !canDeclareAnyBlocker) {
-      const timeout = window.setTimeout(() => {
+      return scheduleAutoAction(() => {
         const result = gameReducer(game, { type: 'DECLARE_BLOCKERS', playerId: HUMAN_PLAYER_ID, assignments: {} })
         if (result.accepted) setGame(result.state)
       }, 320)
-      return () => window.clearTimeout(timeout)
     }
     return undefined
-  }, [autoPass, botThinking, canDeclareAnyBlocker, game, legalAttackerIds.size, playerTurn, pregame, targetingId])
+  }, [autoPass, botThinking, canDeclareAnyBlocker, game, legalAttackerIds.size, playerTurn, pregame, scheduleAutoAction, targetingId])
 
   useEffect(() => {
     const latest = game.events.at(-1)
@@ -743,7 +782,10 @@ export function PracticeMatch({ onExit, deck }: { onExit: () => void; deck: Save
       return `Confirm blockers (${blockers})`
     }
     if (!playerHasPriority) return botThinking ? 'VEX_MAGE thinking' : 'Waiting for priority'
-    return game.stack.length ? `Pass priority · stack ${game.stack.length}` : `Pass · ${getPhaseLabel(game.phase)}`
+    if (game.stack.length > 0) return 'Resolve'
+    if (playerTurn && game.phase === 'main1') return 'To Combat'
+    if (playerTurn && game.phase === 'main2') return 'End Turn'
+    return 'Next'
   }, [attackerSelection.size, blockAssignments, botThinking, game, playerHasPriority, playerTurn, selected, targetingId])
 
   const canSelectHandCard = (cardId: string): boolean => handCardAvailability(cardId).playable
@@ -765,6 +807,9 @@ export function PracticeMatch({ onExit, deck }: { onExit: () => void; deck: Save
     setTimer(0)
     setToast('Review your opening hand')
     previousLife.current = { human: 20, bot: 20 }
+    previousStackIds.current = new Set()
+    setAnnouncements([])
+    hoverPauseUntilRef.current = 0
   }
 
   const handleDrop = (event: React.DragEvent) => {
@@ -836,7 +881,7 @@ export function PracticeMatch({ onExit, deck }: { onExit: () => void; deck: Save
         <div className={`damage-vignette bottom ${damagePulse === 'self' ? 'show' : ''}`} />
 
         <div className="opponent-zone">
-          <PlayerBadge opponent life={opponentLife} active={game.priorityPlayerId === BOT_PLAYER_ID} targetable={targetable({ kind: 'player', playerId: BOT_PLAYER_ID })} onTarget={() => chooseTarget({ kind: 'player', playerId: BOT_PLAYER_ID })} />
+          <PlayerBadge opponent life={opponentLife} active={game.priorityPlayerId === BOT_PLAYER_ID} targetable={targetable({ kind: 'player', playerId: BOT_PLAYER_ID })} onTarget={() => chooseTarget({ kind: 'player', playerId: BOT_PLAYER_ID })} onHover={pauseAutoFlow} />
           <div className="deck-pile opponent-deck" title="Opponent library" aria-label={`Opponent library, ${opponentLibraryCount} cards`}><Layers3 size={15} /><b>{opponentLibraryCount}</b></div>
           <button type="button" className="zone-pile opponent-graveyard" title="View opponent graveyard" aria-label={`View opponent graveyard, ${game.players[BOT_PLAYER_ID].zones.graveyard.length} cards`} onClick={() => setOpenZone({ playerId: BOT_PLAYER_ID, zone: 'graveyard' })}><Archive size={15} /><b>{game.players[BOT_PLAYER_ID].zones.graveyard.length}</b></button>
           <button type="button" className="zone-pile opponent-exile" title="View opponent exile" aria-label={`View opponent exile, ${game.players[BOT_PLAYER_ID].zones.exile.length} cards`} onClick={() => setOpenZone({ playerId: BOT_PLAYER_ID, zone: 'exile' })}><CircleOff size={15} /><b>{game.players[BOT_PLAYER_ID].zones.exile.length}</b></button>
@@ -851,15 +896,15 @@ export function PracticeMatch({ onExit, deck }: { onExit: () => void; deck: Save
           <div className="battle-row lands-row opponent-row" data-zone="Opponent resources">
             <div className="land-cluster">
               {opponentLandPiles.map((pile) => <div className={`land-pile ${pile[0].tapped ? 'is-tapped' : ''}`} key={`${pile[0].oracleName}-${pile[0].tapped ? 'tapped' : 'ready'}`}>
-                <AnimatePresence>{pile.map((card, index) => <GameCard key={card.uid} card={card} zone="field" index={index} eligible={targetable({ kind: 'permanent', cardId: card.uid })} onHover={() => setInspectedId(card.uid)} onClick={() => handleFieldCard(card, 'opponent')} onDoubleClick={() => setZoomed(card)} />)}</AnimatePresence>
+                <AnimatePresence>{pile.map((card, index) => <GameCard key={card.uid} card={card} zone="field" index={index} eligible={targetable({ kind: 'permanent', cardId: card.uid })} onHover={() => { setInspectedId(card.uid); pauseAutoFlow() }} onClick={() => handleFieldCard(card, 'opponent')} onDoubleClick={() => setZoomed(card)} />)}</AnimatePresence>
               </div>)}
             </div>
             <div className="other-permanent-cluster">
-              <AnimatePresence>{opponentOtherPermanents.map((card, index) => <GameCard key={card.uid} card={card} zone="field" index={index} eligible={targetable({ kind: 'permanent', cardId: card.uid })} onHover={() => setInspectedId(card.uid)} onClick={() => handleFieldCard(card, 'opponent')} onDoubleClick={() => setZoomed(card)} />)}</AnimatePresence>
+              <AnimatePresence>{opponentOtherPermanents.map((card, index) => <GameCard key={card.uid} card={card} zone="field" index={index} eligible={targetable({ kind: 'permanent', cardId: card.uid })} onHover={() => { setInspectedId(card.uid); pauseAutoFlow() }} onClick={() => handleFieldCard(card, 'opponent')} onDoubleClick={() => setZoomed(card)} />)}</AnimatePresence>
             </div>
           </div>
           <div className="battle-row creature-row opponent-row" data-zone="Opponent creatures">
-            <AnimatePresence>{opponentCreatures.map((card, index) => <GameCard key={card.uid} card={card} zone="field" index={index} combatDirection={1} combatImpact={combatAnimating && (game.combat.attackers.includes(card.uid) || combatBlockerIds.has(card.uid))} eligible={targetable({ kind: 'permanent', cardId: card.uid }) || (game.phase === 'declare_blockers' && game.combat.attackers.includes(card.uid))} selected={card.uid === blockingAttackerId} onHover={() => setInspectedId(card.uid)} onClick={() => handleFieldCard(card, 'opponent')} onDoubleClick={() => setZoomed(card)} />)}</AnimatePresence>
+            <AnimatePresence>{opponentCreatures.map((card, index) => <GameCard key={card.uid} card={card} zone="field" index={index} combatDirection={1} combatImpact={combatAnimating && (game.combat.attackers.includes(card.uid) || combatBlockerIds.has(card.uid))} eligible={targetable({ kind: 'permanent', cardId: card.uid }) || (game.phase === 'declare_blockers' && game.combat.attackers.includes(card.uid))} selected={card.uid === blockingAttackerId} onHover={() => { setInspectedId(card.uid); pauseAutoFlow() }} onClick={() => handleFieldCard(card, 'opponent')} onDoubleClick={() => setZoomed(card)} />)}</AnimatePresence>
           </div>
         </div>
 
@@ -868,19 +913,19 @@ export function PracticeMatch({ onExit, deck }: { onExit: () => void; deck: Save
 
         <div className="player-zone" onDragOver={(event) => event.preventDefault()} onDrop={handleDrop}>
           <div className="battle-row creature-row player-row" data-zone="Your creatures">
-            <AnimatePresence>{creatures.map((card, index) => <GameCard key={card.uid} card={card} zone="field" index={index} combatDirection={-1} combatImpact={combatAnimating && (game.combat.attackers.includes(card.uid) || combatBlockerIds.has(card.uid))} manaReady={manaReady(card.uid)} eligible={legalAttackerIds.has(card.uid) || targetable({ kind: 'permanent', cardId: card.uid }) || (game.phase === 'declare_blockers' && game.combat.defendingPlayerId === HUMAN_PLAYER_ID && !card.tapped)} selected={attackerSelection.has(card.uid) || Object.values(blockAssignments).some((ids) => ids.includes(card.uid))} onHover={() => setInspectedId(card.uid)} onClick={() => handleFieldCard(card, 'self')} onDoubleClick={() => setZoomed(card)} />)}</AnimatePresence>
+            <AnimatePresence>{creatures.map((card, index) => <GameCard key={card.uid} card={card} zone="field" index={index} combatDirection={-1} combatImpact={combatAnimating && (game.combat.attackers.includes(card.uid) || combatBlockerIds.has(card.uid))} manaReady={manaReady(card.uid)} eligible={legalAttackerIds.has(card.uid) || targetable({ kind: 'permanent', cardId: card.uid }) || (game.phase === 'declare_blockers' && game.combat.defendingPlayerId === HUMAN_PLAYER_ID && !card.tapped)} selected={attackerSelection.has(card.uid) || Object.values(blockAssignments).some((ids) => ids.includes(card.uid))} onHover={() => { setInspectedId(card.uid); pauseAutoFlow() }} onClick={() => handleFieldCard(card, 'self')} onDoubleClick={() => setZoomed(card)} />)}</AnimatePresence>
           </div>
           <div className="battle-row lands-row player-row" data-zone="Your resources">
             <div className="land-cluster">
               {playerLandPiles.map((pile) => <div className={`land-pile ${pile[0].tapped ? 'is-tapped' : ''}`} key={`${pile[0].oracleName}-${pile[0].tapped ? 'tapped' : 'ready'}`}>
-                <AnimatePresence>{pile.map((card, index) => <GameCard key={card.uid} card={card} zone="field" index={index} manaReady={manaReady(card.uid)} eligible={targetable({ kind: 'permanent', cardId: card.uid })} onHover={() => setInspectedId(card.uid)} onClick={() => handleFieldCard(card, 'self')} onDoubleClick={() => setZoomed(card)} />)}</AnimatePresence>
+                <AnimatePresence>{pile.map((card, index) => <GameCard key={card.uid} card={card} zone="field" index={index} manaReady={manaReady(card.uid)} eligible={targetable({ kind: 'permanent', cardId: card.uid })} onHover={() => { setInspectedId(card.uid); pauseAutoFlow() }} onClick={() => handleFieldCard(card, 'self')} onDoubleClick={() => setZoomed(card)} />)}</AnimatePresence>
               </div>)}
             </div>
             <div className="other-permanent-cluster">
-              <AnimatePresence>{otherPermanents.map((card, index) => <GameCard key={card.uid} card={card} zone="field" index={index} manaReady={manaReady(card.uid)} eligible={targetable({ kind: 'permanent', cardId: card.uid })} onHover={() => setInspectedId(card.uid)} onClick={() => handleFieldCard(card, 'self')} onDoubleClick={() => setZoomed(card)} />)}</AnimatePresence>
+              <AnimatePresence>{otherPermanents.map((card, index) => <GameCard key={card.uid} card={card} zone="field" index={index} manaReady={manaReady(card.uid)} eligible={targetable({ kind: 'permanent', cardId: card.uid })} onHover={() => { setInspectedId(card.uid); pauseAutoFlow() }} onClick={() => handleFieldCard(card, 'self')} onDoubleClick={() => setZoomed(card)} />)}</AnimatePresence>
             </div>
           </div>
-          <PlayerBadge life={playerLife} active={playerHasPriority} targetable={targetable({ kind: 'player', playerId: HUMAN_PLAYER_ID })} onTarget={() => chooseTarget({ kind: 'player', playerId: HUMAN_PLAYER_ID })} />
+          <PlayerBadge life={playerLife} active={playerHasPriority} targetable={targetable({ kind: 'player', playerId: HUMAN_PLAYER_ID })} onTarget={() => chooseTarget({ kind: 'player', playerId: HUMAN_PLAYER_ID })} onHover={pauseAutoFlow} />
           <div className="deck-pile self-deck" title={`${libraryCount} cards in library`} aria-label={`Your library, ${libraryCount} cards`}><Layers3 size={15} /><b>{libraryCount}</b></div>
           <button type="button" className="zone-pile self-graveyard" title="View your graveyard" aria-label={`View your graveyard, ${game.players[HUMAN_PLAYER_ID].zones.graveyard.length} cards`} onClick={() => setOpenZone({ playerId: HUMAN_PLAYER_ID, zone: 'graveyard' })}><Archive size={15} /><b>{game.players[HUMAN_PLAYER_ID].zones.graveyard.length}</b></button>
           <button type="button" className="zone-pile self-exile" title="View your exile" aria-label={`View your exile, ${game.players[HUMAN_PLAYER_ID].zones.exile.length} cards`} onClick={() => setOpenZone({ playerId: HUMAN_PLAYER_ID, zone: 'exile' })}><CircleOff size={15} /><b>{game.players[HUMAN_PLAYER_ID].zones.exile.length}</b></button>
@@ -895,7 +940,7 @@ export function PracticeMatch({ onExit, deck }: { onExit: () => void; deck: Save
                   const card = engineCardToView(game.cards[item.sourceId])
                   const isTop = index === game.stack.length - 1
                   return <motion.div key={item.id} className={`stack-card-shell ${isTop ? 'top' : ''}`} style={{ zIndex: index + 1 }} initial={{ opacity: 0, x: 35, scale: .86 }} animate={{ opacity: 1, x: index * 8, y: index * 9, rotate: (index - game.stack.length / 2) * 1.1, scale: 1 }} exit={{ opacity: 0, scale: 1.18, filter: 'brightness(2)' }} transition={{ type: 'spring', stiffness: 360, damping: 29 }}>
-                    <GameCard card={card} zone="stack" eligible={targetable({ kind: 'stack', stackItemId: item.id })} onHover={() => setInspectedId(card.uid)} onClick={() => chooseTarget({ kind: 'stack', stackItemId: item.id })} onDoubleClick={() => setZoomed(card)} />
+                    <GameCard card={card} zone="stack" eligible={targetable({ kind: 'stack', stackItemId: item.id })} onHover={() => { setInspectedId(card.uid); pauseAutoFlow() }} onClick={() => chooseTarget({ kind: 'stack', stackItemId: item.id })} onDoubleClick={() => setZoomed(card)} />
                     {isTop && <div className="resolve-ring" />}
                   </motion.div>
                 })}
@@ -906,20 +951,6 @@ export function PracticeMatch({ onExit, deck }: { onExit: () => void; deck: Save
         </AnimatePresence>
         <div className="stack-drop-hint"><Layers3 size={18} /><span>Stack</span></div>
       </section>
-
-      <aside className="turn-rail">
-        <div className="turn-owner" title={`${playerTurn ? 'Your' : "Opponent's"} turn ${game.turnNumber}`}><b>{game.turnNumber}</b><span>{playerTurn ? 'You' : 'Opp'}</span></div>
-        <div className="phase-track engine-phases" aria-label={`Turn stages, currently ${getPhaseLabel(game.phase)}`}>
-          {TURN_STAGES.map((stage, index) => {
-            const activeIndex = PHASES.indexOf(game.phase)
-            const active = (stage.phases as readonly string[]).includes(game.phase)
-            const done = stage.phases.every((phase) => PHASES.indexOf(phase) < activeIndex)
-            return <div key={`${stage.label}-${index}`} title={`${stage.label}${active ? `: ${getPhaseLabel(game.phase)}` : ''}`} aria-label={`${stage.label}${active ? `, current step ${getPhaseLabel(game.phase)}` : ''}`} className={`phase ${active ? 'active' : ''} ${done ? 'done' : ''}`}>{active && <motion.i className="phase-active-marker" layoutId="active-phase-marker" transition={{ type: 'spring', stiffness: 420, damping: 32 }} />}<span>{stage.icon === 'beginning' ? <Sparkles size={13} /> : stage.icon === 'combat' ? <Swords size={14} /> : stage.icon === 'ending' ? <Clock3 size={13} /> : <Hand size={13} />}</span></div>
-          })}
-        </div>
-        <button type="button" className={`auto-skip ${autoPass ? 'on' : ''}`} aria-pressed={autoPass} title={`Auto-skip ${autoPass ? 'on' : 'off'}: automatically pass when no decision is available`} onClick={() => setAutoPass((value) => !value)}><Shield size={15} /><b>{autoPass ? 'A' : '—'}</b></button>
-        <button type="button" className="undo" title="Restart match" aria-label="Restart match" onClick={resetGame}><RotateCcw size={16} /></button>
-      </aside>
 
       <section className="hand-zone">
         <div className="hand-toolbar">
@@ -951,7 +982,7 @@ export function PracticeMatch({ onExit, deck }: { onExit: () => void; deck: Save
                   index={index}
                   selected={card.uid === selectedId}
                   disabled={!enabled}
-                  onHover={() => setInspectedId(card.uid)}
+                  onHover={() => { setInspectedId(card.uid); pauseAutoFlow() }}
                   onClick={() => { if (enabled) setSelectedId((id) => id === card.uid ? null : card.uid); setInspectedId(card.uid) }}
                   onDragStart={() => { if (enabled) { setDraggingId(card.uid); setSelectedId(card.uid) } }}
                   onDragEnd={() => setDraggingId(null)}
@@ -972,6 +1003,25 @@ export function PracticeMatch({ onExit, deck }: { onExit: () => void; deck: Save
 
       <AnimatePresence>
         {toast && <motion.div className="toast" role="status" aria-live="polite" initial={{ y: -16, opacity: 0 }} animate={{ y: 0, opacity: 1 }} exit={{ y: -8, opacity: 0 }}><Sparkles size={14} />{toast}</motion.div>}
+      </AnimatePresence>
+
+      <AnimatePresence>
+        {activeAnnouncement && (
+          <motion.div
+            key={activeAnnouncement.id}
+            className="spell-announcement"
+            aria-live="polite"
+            initial={{ opacity: 0, scale: 0.72 }}
+            animate={{ opacity: 1, scale: 1 }}
+            exit={{ opacity: 0, scale: 1.08 }}
+            transition={{ duration: 0.32, ease: 'easeOut' }}
+          >
+            <div className="spell-announcement-card">
+              <GameCard card={activeAnnouncement.card} zone="preview" />
+            </div>
+            <div className="spell-announcement-name">{activeAnnouncement.card.name}</div>
+          </motion.div>
+        )}
       </AnimatePresence>
 
       <AnimatePresence>
@@ -1003,7 +1053,7 @@ export function PracticeMatch({ onExit, deck }: { onExit: () => void; deck: Save
             <motion.section className="zone-browser" role="dialog" aria-modal="true" aria-label={`${game.players[openZone.playerId].name} ${openZone.zone}`} initial={{ opacity: 0, y: 32, scale: .97 }} animate={{ opacity: 1, y: 0, scale: 1 }} exit={{ opacity: 0, y: 20, scale: .98 }} onClick={(event) => event.stopPropagation()}>
               <header><div>{openZone.zone === 'graveyard' ? <Archive size={18} /> : <CircleOff size={18} />}<span><b>{game.players[openZone.playerId].name}</b><small>{openZone.zone} · {openZoneCards.length} cards</small></span></div><button type="button" aria-label="Close zone browser" onClick={() => setOpenZone(null)}><X size={18} /></button></header>
               <div className="zone-browser-cards">
-                {openZoneCards.length ? openZoneCards.map((card, index) => <GameCard key={card.uid} card={card} zone="preview" index={index} onHover={() => setInspectedId(card.uid)} onClick={() => setZoomed(card)} />) : <div className="zone-empty"><Layers3 size={28} /><b>No cards here</b></div>}
+                {openZoneCards.length ? openZoneCards.map((card, index) => <GameCard key={card.uid} card={card} zone="preview" index={index} onHover={() => { setInspectedId(card.uid); pauseAutoFlow() }} onClick={() => setZoomed(card)} />) : <div className="zone-empty"><Layers3 size={28} /><b>No cards here</b></div>}
               </div>
             </motion.section>
           </motion.div>
