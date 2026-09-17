@@ -1,4 +1,4 @@
-import { canBlockAttacker, canPayMana, checkAction, entersTargetSlotIndices, gameReducer, getManaProduction, getPower, getToughness, matchesTargetRestriction } from './game'
+import { canBlockAttacker, canPayMana, checkAction, entersTargetSlotIndices, gameReducer, getManaProduction, getPower, getToughness, matchesTargetRestriction, parseManaCost } from './game'
 import type {
   CardInstance,
   CardInstanceId,
@@ -118,6 +118,48 @@ export function chooseTargets(state: GameState, playerId: PlayerId, effects: Eng
   return result
 }
 
+const HOLDABLE_EFFECT_TYPES = new Set<EngineEffect['type']>([
+  'damage',
+  'destroy',
+  'exile',
+  'tap',
+  'return_to_hand',
+  'modify_stats',
+  'counter_stack_item',
+])
+
+function isInstantSpeed(card: CardInstance): boolean {
+  return card.types.includes('instant') || (card.keywords ?? []).includes('flash')
+}
+
+/**
+ * True when this instant/flash spell is shaped like reactive removal or a combat trick (it damages,
+ * destroys, exiles, taps or bounces something, pumps/protects a creature, or answers the stack) and is
+ * therefore usually worth more held up for the opponent's turn or combat than fired proactively.
+ * Sorcery-speed cards and creatures are never "holdable" - they should still be cast on curve.
+ */
+function isHoldableInstant(card: CardInstance): boolean {
+  if (!isInstantSpeed(card)) return false
+  const effects = [...(card.effects ?? []), ...(card.entersEffects ?? [])]
+  return effects.some((effect) => HOLDABLE_EFFECT_TYPES.has(effect.type))
+}
+
+/**
+ * Phase-awareness for instant-speed interaction: a holdable instant should generally NOT be cast
+ * proactively in our own precombat/postcombat main phase on an otherwise unthreatening board - it is
+ * worth more used in response to the opponent's actions or during their combat. We still cast it right
+ * away whenever there's a concrete reason to: something is already on the stack (the correct response
+ * window), or we're outside our own main phases (combat steps, the opponent's turn) where waiting longer
+ * buys nothing.
+ */
+function shouldCastNow(state: GameState, playerId: PlayerId, card: CardInstance): boolean {
+  if (!isHoldableInstant(card)) return true
+  if (state.stack.length > 0) return true
+  if (!(state.phase === 'main1' || state.phase === 'main2')) return true
+  if (state.activePlayerId !== playerId) return true
+  return false
+}
+
 function castCandidates(state: GameState, playerId: PlayerId, usePotentialMana: boolean): Array<{ action: GameAction; card: CardInstance }> {
   const player = state.players[playerId]
   return player.zones.hand
@@ -142,7 +184,7 @@ function castCandidates(state: GameState, playerId: PlayerId, usePotentialMana: 
       }
       return checkAction(state, action).legal
     })
-    .sort((left, right) => cardValue(right.card) - cardValue(left.card) || left.card.name.localeCompare(right.card.name))
+    .sort((left, right) => cardValue(right.card) - cardValue(left.card) || (left.card.manaValue ?? 0) - (right.card.manaValue ?? 0) || left.card.name.localeCompare(right.card.name))
 }
 
 function chooseManaAction(state: GameState, playerId: PlayerId, card: CardInstance): GameAction | null {
@@ -197,6 +239,36 @@ function canPayWithSources(pool: ManaPool, sources: Array<Partial<ManaPool>>, co
   return search(0, { ...pool })
 }
 
+/**
+ * Rough per-color demand from the cards still in hand (spells only), used to steer land sequencing
+ * toward whichever land actually unlocks something instead of an arbitrary/alphabetical pick. Hybrid
+ * symbols split their weight across the colors that satisfy them.
+ */
+function colorNeedsFromHand(state: GameState, playerId: PlayerId): Partial<Record<ManaColor, number>> {
+  const needs: Partial<Record<ManaColor, number>> = {}
+  for (const cardId of state.players[playerId].zones.hand) {
+    const card = state.cards[cardId]
+    if (card.types.includes('land')) continue
+    for (const symbol of parseManaCost(card.manaCost)) {
+      const colors = symbol.split('/').filter((part): part is ManaColor => COLORS.includes(part as ManaColor) && part !== 'C')
+      if (!colors.length) continue
+      const weight = 1 / colors.length
+      for (const color of colors) needs[color] = (needs[color] ?? 0) + weight
+    }
+  }
+  return needs
+}
+
+/** Higher is better: lands that produce colors our hand actually needs score above ones that don't,
+ * and among lands that are equally useful (or equally useless) right now, more color-flexible lands
+ * (duals/multi-color) are preferred since they keep future options open. */
+function scoreLandForNeeds(land: CardInstance, needs: Partial<Record<ManaColor, number>>): number {
+  const production = getManaProduction(land)
+  const coloredProduction = COLORS.filter((color) => color !== 'C' && (production[color] ?? 0) > 0)
+  const needScore = coloredProduction.reduce((sum, color) => sum + (needs[color] ?? 0), 0)
+  return needScore * 10 + coloredProduction.length
+}
+
 export function chooseAttackers(state: GameState, playerId: PlayerId): CardInstanceId[] {
   if (state.phase !== 'declare_attackers' || state.activePlayerId !== playerId) return []
   const defenderId = state.combat.defendingPlayerId ?? opponentIds(state, playerId)[0]
@@ -216,9 +288,56 @@ export function chooseAttackers(state: GameState, playerId: PlayerId): CardInsta
     .map((card) => card.instanceId)
 }
 
+function menaceNeeded(card: CardInstance): number {
+  return (card.keywords ?? []).includes('menace') ? 2 : 1
+}
+
+function pickBlockerForAttacker(attacker: CardInstance, candidates: CardInstance[]): CardInstance {
+  return candidates.find((blocker) => getPower(blocker) >= getToughness(attacker)) ?? candidates[0]
+}
+
+/** Greedily assigns blockers to attackers in the given order, preferring a blocker that kills the
+ * attacker outright over just chump-blocking it. Attacker order is what determines which attackers get
+ * first claim on the (possibly scarce) pool of blockers. */
+function buildBlockPlan(attackers: CardInstance[], pool: CardInstance[]): Record<CardInstanceId, CardInstanceId[]> {
+  const available = [...pool]
+  const assignments: Record<CardInstanceId, CardInstanceId[]> = {}
+  for (const attacker of attackers) {
+    const needed = menaceNeeded(attacker)
+    const candidates = available.filter((blocker) => canBlockAttacker(attacker, blocker))
+    if (candidates.length < needed) continue
+    const selected: CardInstance[] = []
+    while (selected.length < needed) {
+      const blocker = pickBlockerForAttacker(attacker, candidates)
+      selected.push(blocker)
+      candidates.splice(candidates.indexOf(blocker), 1)
+      available.splice(available.indexOf(blocker), 1)
+    }
+    assignments[attacker.instanceId] = selected.map((card) => card.instanceId)
+  }
+  return assignments
+}
+
+/** Total damage that would get through under a given block plan: full attacker power for anything left
+ * unblocked, plus trample overflow for anything blocked but not fully absorbed. */
+function totalUnblockedDamage(state: GameState, attackers: CardInstance[], assignments: Record<CardInstanceId, CardInstanceId[]>): number {
+  let total = 0
+  for (const attacker of attackers) {
+    const blockerIds = assignments[attacker.instanceId]
+    if (!blockerIds || blockerIds.length === 0) {
+      total += getPower(attacker)
+      continue
+    }
+    if ((attacker.keywords ?? []).includes('trample')) {
+      const blockerToughness = blockerIds.reduce((sum, id) => sum + getToughness(state.cards[id]), 0)
+      total += Math.max(0, getPower(attacker) - blockerToughness)
+    }
+  }
+  return total
+}
+
 export function chooseBlocks(state: GameState, playerId: PlayerId): Record<CardInstanceId, CardInstanceId[]> {
   if (state.phase !== 'declare_blockers' || state.combat.defendingPlayerId !== playerId) return {}
-  const assignments: Record<CardInstanceId, CardInstanceId[]> = {}
   const available = state.players[playerId].zones.battlefield
     .map((id) => state.cards[id])
     .filter((card) => card.types.includes('creature') && !card.tapped)
@@ -228,21 +347,26 @@ export function chooseBlocks(state: GameState, playerId: PlayerId): Record<CardI
     .filter(Boolean)
     .sort((left, right) => getPower(right) - getPower(left) || left.instanceId.localeCompare(right.instanceId))
 
-  for (const attacker of attackers) {
-    const needed = (attacker.keywords ?? []).includes('menace') ? 2 : 1
-    const candidates = available.filter((blocker) => canBlockAttacker(attacker, blocker))
-    if (candidates.length < needed) continue
-    const selected: CardInstance[] = []
-    while (selected.length < needed) {
-      const lethal = candidates.find((blocker) => getPower(blocker) >= getToughness(attacker))
-      const blocker = lethal ?? candidates[0]
-      selected.push(blocker)
-      candidates.splice(candidates.indexOf(blocker), 1)
-      available.splice(available.indexOf(blocker), 1)
-    }
-    assignments[attacker.instanceId] = selected.map((card) => card.instanceId)
-  }
-  return assignments
+  const greedy = buildBlockPlan(attackers, available)
+  const life = state.players[playerId].life
+  if (totalUnblockedDamage(state, attackers, greedy) < life) return greedy
+
+  // The value-oriented plan above would let lethal (or exactly-lethal) damage through. Before accepting
+  // that, check whether ANY legal block assignment - even a pure, unprofitable chump block - keeps us
+  // alive, and prefer it: staying alive beats optimizing for favorable trades. Re-ordering attackers by
+  // "power prevented per blocker spent" (rather than raw power) lets a single-blocker attacker outrank a
+  // menace attacker of the same power, since double-blocking menace can otherwise eat blockers that would
+  // have covered two other attackers instead.
+  const survivalAttackerOrder = [...attackers].sort((left, right) => {
+    const leftRatio = getPower(left) / menaceNeeded(left)
+    const rightRatio = getPower(right) / menaceNeeded(right)
+    return rightRatio - leftRatio || getPower(right) - getPower(left) || left.instanceId.localeCompare(right.instanceId)
+  })
+  const survival = buildBlockPlan(survivalAttackerOrder, available)
+  if (totalUnblockedDamage(state, attackers, survival) < life) return survival
+
+  // No legal assignment prevents lethal - nothing left to do but fall back to the value-oriented plan.
+  return greedy
 }
 
 export function chooseBotAction(state: GameState, playerId: PlayerId): BotDecision | null {
@@ -282,18 +406,19 @@ export function chooseBotAction(state: GameState, playerId: PlayerId): BotDecisi
   }
 
   if (playerId === state.activePlayerId && ['main1', 'main2'].includes(state.phase) && !state.stack.length) {
+    const needs = colorNeedsFromHand(state, playerId)
     const land = player.zones.hand
       .map((id) => state.cards[id])
       .filter((card) => card.types.includes('land'))
-      .sort((left, right) => left.name.localeCompare(right.name) || left.instanceId.localeCompare(right.instanceId))
-      .find((card) => checkAction(state, { type: 'PLAY_LAND', playerId, cardId: card.instanceId }).legal)
+      .filter((card) => checkAction(state, { type: 'PLAY_LAND', playerId, cardId: card.instanceId }).legal)
+      .sort((left, right) => scoreLandForNeeds(right, needs) - scoreLandForNeeds(left, needs) || left.name.localeCompare(right.name) || left.instanceId.localeCompare(right.instanceId))[0]
     if (land) return { action: { type: 'PLAY_LAND', playerId, cardId: land.instanceId }, reason: `Develop mana with ${land.name}.` }
   }
 
-  const payable = castCandidates(state, playerId, false)[0]
+  const payable = castCandidates(state, playerId, false).find((candidate) => shouldCastNow(state, playerId, candidate.card))
   if (payable) return { action: payable.action, reason: `Cast the highest-value payable spell, ${payable.card.name}.` }
 
-  const potential = castCandidates(state, playerId, true)[0]
+  const potential = castCandidates(state, playerId, true).find((candidate) => shouldCastNow(state, playerId, candidate.card))
   if (potential) {
     const manaAction = chooseManaAction(state, playerId, potential.card)
     if (manaAction) return { action: manaAction, reason: `Produce mana for ${potential.card.name}.` }

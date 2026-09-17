@@ -33,11 +33,11 @@ Cheap, contained, high-confidence fixes. Do these first.
 ## Phase 2 — Bot AI quality
 Contained to `bot.ts`; makes solo play meaningfully less exploitable.
 
-- [ ] 🟡 Blocking never checks total unblocked damage against its own life —
+- [x] 🟡 Blocking never checks total unblocked damage against its own life —
       bot can decline profitable-looking blocks and just die.
-- [ ] 🟡 Bot proactively casts instants/removal instead of holding them up
+- [x] 🟡 Bot proactively casts instants/removal instead of holding them up
       during the opponent's combat.
-- [ ] 🟡 Land/spell sequencing is alphabetical, not color/curve-aware.
+- [x] 🟡 Land/spell sequencing is alphabetical, not color/curve-aware.
 
 ## Phase 3 — Visual quick wins
 Cheap, high-visibility, don't require touching the engine.

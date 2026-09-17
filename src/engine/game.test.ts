@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { chooseBotAction } from './bot'
+import { chooseBlocks, chooseBotAction } from './bot'
 import { createGame, gameReducer, getPower, getToughness, reduceActions, runStateBasedActions } from './game'
 import type { CardDefinition, GameState } from './types'
 
@@ -521,5 +521,146 @@ describe('attacker-chosen damage order', () => {
     ])
     expect(damageDealt.state.players.b.zones.graveyard).toContain(goatId)
     expect(damageDealt.state.players.b.zones.battlefield).toContain(wallId)
+  })
+})
+
+describe('bot AI quality', () => {
+  it('chump-blocks to avoid lethal instead of only taking favorable trades', () => {
+    // Bot ('b') is defending at 4 life against a menace 3/3 plus two vanilla 2/2s, with only two 1/1
+    // blockers available. Double-blocking the menace attacker (the "profitable-looking" greedy pick by
+    // raw power) leaves both 2/2s completely unblocked for 4 damage - exactly lethal at 4 life. Chump-
+    // blocking the two 2/2s instead and letting the menace creature through only deals 3, which survives.
+    const menace: CardDefinition = { id: 'menace', name: 'Menace Ogre', types: ['creature'], keywords: ['menace'], power: 3, toughness: 3 }
+    const vanillaA: CardDefinition = { id: 'vanillaA', name: 'Vanilla A', types: ['creature'], power: 2, toughness: 2 }
+    const vanillaB: CardDefinition = { id: 'vanillaB', name: 'Vanilla B', types: ['creature'], power: 2, toughness: 2 }
+    const chump: CardDefinition = { id: 'chump', name: 'Chump', types: ['creature'], power: 1, toughness: 1 }
+    const state = gameWithDecks([menace, vanillaA, vanillaB], [chump, chump], 0)
+    const [menaceId, vanillaAId, vanillaBId] = state.players.a.zones.library
+    const [chumpXId, chumpYId] = state.players.b.zones.library
+    state.players.a.zones.library = []
+    state.players.b.zones.library = []
+    state.players.a.zones.battlefield = [menaceId, vanillaAId, vanillaBId]
+    state.players.b.zones.battlefield = [chumpXId, chumpYId]
+    for (const id of [menaceId, vanillaAId, vanillaBId, chumpXId, chumpYId]) state.cards[id].summoningSick = false
+    state.players.b.life = 4
+    state.phase = 'declare_blockers'
+    state.combat.defendingPlayerId = 'b'
+    state.combat.attackers = [menaceId, vanillaAId, vanillaBId]
+
+    const assignments = chooseBlocks(state, 'b')
+    // The menace attacker must go unblocked (only two blockers total, and it alone would eat both).
+    expect(assignments[menaceId]).toBeUndefined()
+    // Both vanilla attackers must be chump-blocked so the bot survives.
+    expect(assignments[vanillaAId]).toBeDefined()
+    expect(assignments[vanillaBId]).toBeDefined()
+  })
+
+  it('still prefers the greedy value-oriented blocks when nothing is at risk of dying', () => {
+    // Same shape of board, but at a life total high enough that letting everything through is fine -
+    // the bot should keep double-blocking the menace attacker (the original, value-seeking behavior)
+    // rather than being forced into an unnecessary chump-block pattern.
+    const menace: CardDefinition = { id: 'menace', name: 'Menace Ogre', types: ['creature'], keywords: ['menace'], power: 3, toughness: 3 }
+    const vanillaA: CardDefinition = { id: 'vanillaA', name: 'Vanilla A', types: ['creature'], power: 2, toughness: 2 }
+    const vanillaB: CardDefinition = { id: 'vanillaB', name: 'Vanilla B', types: ['creature'], power: 2, toughness: 2 }
+    const chump: CardDefinition = { id: 'chump', name: 'Chump', types: ['creature'], power: 1, toughness: 1 }
+    const state = gameWithDecks([menace, vanillaA, vanillaB], [chump, chump], 0)
+    const [menaceId, vanillaAId, vanillaBId] = state.players.a.zones.library
+    const [chumpXId, chumpYId] = state.players.b.zones.library
+    state.players.a.zones.library = []
+    state.players.b.zones.library = []
+    state.players.a.zones.battlefield = [menaceId, vanillaAId, vanillaBId]
+    state.players.b.zones.battlefield = [chumpXId, chumpYId]
+    for (const id of [menaceId, vanillaAId, vanillaBId, chumpXId, chumpYId]) state.cards[id].summoningSick = false
+    state.players.b.life = 20
+    state.phase = 'declare_blockers'
+    state.combat.defendingPlayerId = 'b'
+    state.combat.attackers = [menaceId, vanillaAId, vanillaBId]
+
+    const assignments = chooseBlocks(state, 'b')
+    expect(assignments[menaceId]).toEqual(expect.arrayContaining([chumpXId, chumpYId]))
+  })
+
+  it('holds an instant-speed removal spell in its own precombat main instead of firing it proactively', () => {
+    // Lightning Bolt-shaped instant that deals damage to a target. On an unthreatening board (nothing
+    // to answer, opponent hasn't attacked), the bot should hold priority rather than blow the spell now.
+    const bolt: CardDefinition = {
+      id: 'bolt',
+      name: 'Shock',
+      types: ['instant'],
+      manaCost: '{R}',
+      manaValue: 1,
+      effects: [{ type: 'damage', amount: 2, target: { kind: 'target-slot', index: 0, restriction: 'creature' } }],
+    }
+    const opposingBear: CardDefinition = { id: 'bear', name: 'Bear', types: ['creature'], power: 2, toughness: 2 }
+    const state = gameWithDecks([bolt], [opposingBear], 0)
+    state.phase = 'main1'
+    const [boltId] = state.players.a.zones.library
+    const [bearId] = state.players.b.zones.library
+    state.players.a.zones.library = []
+    state.players.a.zones.hand = [boltId]
+    state.players.b.zones.library = []
+    state.players.b.zones.battlefield = [bearId]
+    state.cards[bearId].summoningSick = false
+    // Give the bot enough mana in its pool to pay for the bolt right now, so the only thing stopping
+    // it from casting is the new hold-up heuristic, not a mana shortage.
+    state.players.a.manaPool.R = 1
+
+    const decision = chooseBotAction(state, 'a')
+    expect(decision?.action.type).not.toBe('CAST_SPELL')
+  })
+
+  it('still casts the held instant right away when responding to something on the stack', () => {
+    const bolt: CardDefinition = {
+      id: 'bolt',
+      name: 'Shock',
+      types: ['instant'],
+      manaCost: '{R}',
+      manaValue: 1,
+      effects: [{ type: 'damage', amount: 2, target: { kind: 'target-slot', index: 0, restriction: 'creature' } }],
+    }
+    const opposingBear: CardDefinition = { id: 'bear', name: 'Bear', types: ['creature'], power: 2, toughness: 2 }
+    const growth: CardDefinition = { id: 'growth', name: 'Giant Growth', types: ['instant'], manaCost: '{G}', manaValue: 1, effects: [] }
+    const state = gameWithDecks([bolt], [opposingBear], 0)
+    state.phase = 'main1'
+    const [boltId] = state.players.a.zones.library
+    const [bearId] = state.players.b.zones.library
+    state.players.a.zones.library = []
+    state.players.a.zones.hand = [boltId]
+    state.players.b.zones.library = []
+    state.players.b.zones.battlefield = [bearId]
+    state.cards[bearId].summoningSick = false
+    state.players.a.manaPool.R = 1
+    // Put an opposing spell on the stack targeting nothing in particular - the point is just that the
+    // stack is non-empty, which is the correct response window.
+    state.stack = [{
+      id: 'stack-1',
+      kind: 'spell',
+      controllerId: 'b',
+      sourceId: bearId,
+      name: growth.name,
+      effects: [],
+      targets: [],
+      counterable: true,
+    }]
+    state.priorityPlayerId = 'a'
+
+    const decision = chooseBotAction(state, 'a')
+    expect(decision?.action.type).toBe('CAST_SPELL')
+  })
+
+  it('prefers a land that produces a color the hand actually needs over an earlier alphabetical land', () => {
+    // The bot holds a green spell but no red spell. Between an alphabetically-earlier Mountain and a
+    // Forest, it should play the Forest because that's the color its hand can actually use.
+    const forestLand: CardDefinition = { id: 'forestLand', name: 'Forest', types: ['land'], producesMana: { G: 1 } }
+    const mountainLand: CardDefinition = { id: 'mountainLand', name: 'Mountain', types: ['land'], producesMana: { R: 1 } }
+    const greenSpell: CardDefinition = { id: 'greenSpell', name: 'Green Spell', types: ['creature'], manaCost: '{G}', manaValue: 1, power: 1, toughness: 1 }
+    const state = gameWithDecks([mountainLand, forestLand, greenSpell], [forest], 0)
+    const [mountainId, forestId, greenSpellId] = state.players.a.zones.library
+    state.players.a.zones.library = []
+    state.players.a.zones.hand = [mountainId, forestId, greenSpellId]
+    state.phase = 'main1'
+
+    const decision = chooseBotAction(state, 'a')
+    expect(decision?.action).toEqual({ type: 'PLAY_LAND', playerId: 'a', cardId: forestId })
   })
 })
