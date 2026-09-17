@@ -120,6 +120,8 @@ export interface CardDefinition {
   effects?: EngineEffect[]
   entersEffects?: EngineEffect[]
   imageUri?: string
+  /** True for permanents whose type line includes "Legendary" (drives the legend rule). */
+  legendary?: boolean
 }
 
 export interface CardInstance extends CardDefinition {
@@ -211,6 +213,8 @@ export interface GameState {
   eventSequence: number
   stackSequence: number
   events: GameEvent[]
+  /** Set to a player who must discard down to the maximum hand size before the game can proceed. */
+  pendingDiscard: PlayerId | null
 }
 
 export interface GamePlayerSetup {
@@ -246,6 +250,8 @@ export type GameAction =
     }
   | { type: 'DECLARE_ATTACKERS'; playerId: PlayerId; attackerIds: CardInstanceId[]; defenderId?: PlayerId }
   | { type: 'DECLARE_BLOCKERS'; playerId: PlayerId; assignments: Record<CardInstanceId, CardInstanceId[]> }
+  | { type: 'ORDER_BLOCKERS'; playerId: PlayerId; attackerId: CardInstanceId; order: CardInstanceId[] }
+  | { type: 'DISCARD_CARDS'; playerId: PlayerId; cardIds: CardInstanceId[] }
   | { type: 'CONCEDE'; playerId: PlayerId }
 
 export interface ActionResult {
@@ -260,3 +266,6 @@ export interface LegalityResult {
 }
 
 export const EMPTY_MANA_POOL: ManaPool = Object.freeze({ W: 0, U: 0, B: 0, R: 0, G: 0, C: 0 })
+
+/** Standard Magic maximum hand size, enforced at cleanup. No format override exists yet. */
+export const MAX_HAND_SIZE = 7

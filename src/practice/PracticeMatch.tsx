@@ -25,11 +25,13 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } fr
 import { CardZoom } from '../CardZoom'
 import { botDeck, catalog, type CatalogCard, type SavedDeck } from '../catalog'
 import {
+  canBlockAttacker,
   checkAction,
   chooseBotAction,
   gameReducer,
   getManaProduction,
   getPhaseLabel,
+  MAX_HAND_SIZE,
   type CardInstanceId,
   type GameAction,
   type GameState,
@@ -43,6 +45,7 @@ import {
   arenaPhase,
   BOT_PLAYER_ID,
   bottomOpeningCards,
+  castTargetCount,
   castWithAutomaticMana,
   createPracticeGame,
   engineCardToView,
@@ -303,6 +306,10 @@ export function PracticeMatch({ onExit, deck }: { onExit: () => void; deck: Save
   const [botThinking, setBotThinking] = useState(false)
   const [handSort, setHandSort] = useState<HandSortMode>(initialHandSort)
   const [openZone, setOpenZone] = useState<OpenZone>(null)
+  const [discardSelection, setDiscardSelection] = useState<Set<string>>(new Set())
+  const [orderingAttackerId, setOrderingAttackerId] = useState<string | null>(null)
+  const [damageOrderSelection, setDamageOrderSelection] = useState<CardInstanceId[]>([])
+  const [orderedAttackerIds, setOrderedAttackerIds] = useState<Set<string>>(new Set())
   const previousLife = useRef({ human: 20, bot: 20 })
   const audio = useRef(new GameAudio())
   const lastSoundEvent = useRef(game.eventSequence)
@@ -348,6 +355,8 @@ export function PracticeMatch({ onExit, deck }: { onExit: () => void; deck: Save
   const combatAnimating = game.combat.blockersDeclared && !game.combat.damageDealt
   const availableBlockers = creatures.filter((card) => !card.tapped && !card.summoningSick)
   const canDeclareAnyBlocker = opponentAttackers.length > 0 && availableBlockers.length > 0
+  const pendingDiscardCount = game.pendingDiscard === HUMAN_PLAYER_ID ? Math.max(0, game.players[HUMAN_PLAYER_ID].zones.hand.length - MAX_HAND_SIZE) : 0
+  const orderingBlockerIds = orderingAttackerId ? (game.combat.blockers[orderingAttackerId] ?? []) : []
 
   const handCardAvailability = useCallback((cardId: string): { playable: boolean; reason: string } => {
     const card = game.cards[cardId]
@@ -564,26 +573,26 @@ export function PracticeMatch({ onExit, deck }: { onExit: () => void; deck: Save
     const mustBlock = game.phase === 'declare_blockers'
       && game.combat.defendingPlayerId === HUMAN_PLAYER_ID
       && !game.combat.blockersDeclared
-    if (!autoPass || pregame !== 'done' || playerTurn || !playerHasPriority || shouldPauseForDecision || mustBlock || targetingId) return
+    if (!autoPass || pregame !== 'done' || playerTurn || !playerHasPriority || shouldPauseForDecision || mustBlock || targetingId || pendingDiscardCount > 0 || orderingAttackerId) return
     return scheduleAutoAction(() => {
       const result = gameReducer(game, { type: 'PASS_PRIORITY', playerId: HUMAN_PLAYER_ID })
       if (result.accepted) setGame(result.state)
     }, 520)
-  }, [autoPass, game, playerHasPriority, playerTurn, pregame, scheduleAutoAction, shouldPauseForDecision, targetingId])
+  }, [autoPass, game, orderingAttackerId, pendingDiscardCount, playerHasPriority, playerTurn, pregame, scheduleAutoAction, shouldPauseForDecision, targetingId])
 
   // Move through mandatory steps when the player has no meaningful decision.
   useEffect(() => {
-    if (!autoPass || pregame !== 'done' || botThinking || targetingId || !playerTurn || !playerHasPriority) return
+    if (!autoPass || pregame !== 'done' || botThinking || targetingId || !playerTurn || !playerHasPriority || pendingDiscardCount > 0 || orderingAttackerId) return
     if (shouldPauseForDecision || !AUTO_SKIP_PASS_PHASES.has(game.phase)) return
     return scheduleAutoAction(() => {
       const result = gameReducer(game, { type: 'PASS_PRIORITY', playerId: HUMAN_PLAYER_ID })
       if (result.accepted) setGame(result.state)
     }, 360)
-  }, [autoPass, botThinking, game, playerHasPriority, playerTurn, pregame, scheduleAutoAction, shouldPauseForDecision, targetingId])
+  }, [autoPass, botThinking, game, orderingAttackerId, pendingDiscardCount, playerHasPriority, playerTurn, pregame, scheduleAutoAction, shouldPauseForDecision, targetingId])
 
   // Skip combat decisions that cannot produce a different game state.
   useEffect(() => {
-    if (!autoPass || pregame !== 'done' || botThinking || targetingId) return
+    if (!autoPass || pregame !== 'done' || botThinking || targetingId || pendingDiscardCount > 0 || orderingAttackerId) return
     if (game.phase === 'declare_attackers' && playerTurn && !game.combat.attackersDeclared && legalAttackerIds.size === 0) {
       return scheduleAutoAction(() => {
         const result = gameReducer(game, { type: 'DECLARE_ATTACKERS', playerId: HUMAN_PLAYER_ID, attackerIds: [] })
@@ -597,12 +606,54 @@ export function PracticeMatch({ onExit, deck }: { onExit: () => void; deck: Save
       }, 320)
     }
     return undefined
-  }, [autoPass, botThinking, canDeclareAnyBlocker, game, legalAttackerIds.size, playerTurn, pregame, scheduleAutoAction, targetingId])
+  }, [autoPass, botThinking, canDeclareAnyBlocker, game, legalAttackerIds.size, orderingAttackerId, pendingDiscardCount, playerTurn, pregame, scheduleAutoAction, targetingId])
 
   useEffect(() => {
     const latest = game.events.at(-1)
     if (latest && pregame === 'done') setToast(latest.message)
   }, [game.eventSequence, game.events, pregame])
+
+  // Reset once-per-combat damage-order bookkeeping when a new turn begins.
+  useEffect(() => {
+    setOrderedAttackerIds(new Set())
+  }, [game.turnNumber])
+
+  // When the human attacks and a double-blocked attacker's blocks are declared, prompt for damage order.
+  useEffect(() => {
+    const canOrderNow = pregame === 'done'
+      && game.phase === 'declare_blockers'
+      && game.combat.blockersDeclared
+      && !game.combat.damageDealt
+      && playerHasPriority
+      && playerTurn
+    if (!canOrderNow) {
+      if (orderingAttackerId) { setOrderingAttackerId(null); setDamageOrderSelection([]) }
+      return
+    }
+    if (orderingAttackerId) return
+    const next = game.combat.attackers.find((id) => {
+      const attacker = game.cards[id]
+      return attacker?.controllerId === HUMAN_PLAYER_ID && (game.combat.blockers[id]?.length ?? 0) >= 2 && !orderedAttackerIds.has(id)
+    })
+    if (next) {
+      setOrderingAttackerId(next)
+      setDamageOrderSelection([])
+      setToast(`${game.cards[next].name} is blocked by multiple creatures - click them in the order to assign damage.`)
+    }
+  }, [game, orderedAttackerIds, orderingAttackerId, playerHasPriority, playerTurn, pregame])
+
+  // Once every declared blocker for that attacker has been ordered, submit it and move on.
+  useEffect(() => {
+    if (!orderingAttackerId) return
+    const blockers = game.combat.blockers[orderingAttackerId] ?? []
+    if (blockers.length > 0 && damageOrderSelection.length >= blockers.length) {
+      const result = gameReducer(game, { type: 'ORDER_BLOCKERS', playerId: HUMAN_PLAYER_ID, attackerId: orderingAttackerId, order: damageOrderSelection })
+      if (result.accepted) setGame(result.state)
+      setOrderedAttackerIds((current) => new Set([...current, orderingAttackerId]))
+      setOrderingAttackerId(null)
+      setDamageOrderSelection([])
+    }
+  }, [damageOrderSelection, game, orderingAttackerId])
 
   const formattedTime = `${String(Math.floor(timer / 60)).padStart(2, '0')}:${String(timer % 60).padStart(2, '0')}`
   const zoomCard = zoomed ? (catalog.find((card) => card.name === zoomed.name) || {
@@ -679,7 +730,10 @@ export function PracticeMatch({ onExit, deck }: { onExit: () => void; deck: Save
       if (dispatch({ type: 'PLAY_LAND', playerId: HUMAN_PLAYER_ID, cardId })) setSelectedId(null)
       return
     }
-    if (requiredTargetCount(card) > 0) {
+    // Only enter target-picking mode for slots that must actually be supplied right now. An
+    // enters-the-battlefield trigger with no legal target on the board simply fizzles (it never blocks
+    // casting the permanent), so it never puts the player into a "choose a legal target" dead end.
+    if (castTargetCount(game, HUMAN_PLAYER_ID, card) > 0) {
       if (findManaActions(game, HUMAN_PLAYER_ID, card.manaCost) === null) {
         setToast(`You cannot produce the mana required for ${card.name}.`)
         return
@@ -695,12 +749,18 @@ export function PracticeMatch({ onExit, deck }: { onExit: () => void; deck: Save
   const chooseTarget = (target: TargetRef) => {
     if (!targetingId || !targetOptions.some((option) => targetEquals(option, target))) return
     const nextTargets = [...chosenTargets, target]
-    if (nextTargets.length >= requiredTargetCount(game.cards[targetingId])) completeCast(targetingId, nextTargets)
+    if (nextTargets.length >= castTargetCount(game, HUMAN_PLAYER_ID, game.cards[targetingId])) completeCast(targetingId, nextTargets)
     else setChosenTargets(nextTargets)
   }
 
   const handleFieldCard = (card: CardData, owner: 'self' | 'opponent') => {
     setInspectedId(card.uid)
+    if (orderingAttackerId) {
+      if (owner === 'opponent' && orderingBlockerIds.includes(card.uid) && !damageOrderSelection.includes(card.uid)) {
+        setDamageOrderSelection((current) => [...current, card.uid])
+      }
+      return
+    }
     if (targetingId) {
       chooseTarget({ kind: 'permanent', cardId: card.uid })
       return
@@ -724,6 +784,12 @@ export function PracticeMatch({ onExit, deck }: { onExit: () => void; deck: Save
         return
       }
       if (owner === 'self' && blockingAttackerId && card.kind === 'creature' && !card.tapped) {
+        const attackerInstance = game.cards[blockingAttackerId]
+        const blockerInstance = game.cards[card.uid]
+        if (!attackerInstance || !blockerInstance || !canBlockAttacker(attackerInstance, blockerInstance)) {
+          setToast(`${card.name} cannot block ${attackerInstance?.name ?? 'that attacker'}.`)
+          return
+        }
         setBlockAssignments((current) => {
           const cleaned = Object.fromEntries(Object.entries(current).map(([attackerId, blockers]) => [attackerId, blockers.filter((id) => id !== card.uid)]))
           const alreadyOnSelected = current[blockingAttackerId]?.includes(card.uid)
@@ -746,10 +812,35 @@ export function PracticeMatch({ onExit, deck }: { onExit: () => void; deck: Save
 
   const declareBlockers = () => {
     const assignments = Object.fromEntries(Object.entries(blockAssignments).filter(([, blockers]) => blockers.length))
+    for (const [attackerId, blockers] of Object.entries(assignments)) {
+      const attacker = game.cards[attackerId]
+      if (attacker && (attacker.keywords ?? []).includes('menace') && blockers.length < 2) {
+        setToast(`${attacker.name} has menace - assign at least 2 blockers.`)
+        return
+      }
+    }
     dispatch({ type: 'DECLARE_BLOCKERS', playerId: HUMAN_PLAYER_ID, assignments })
   }
 
+  const toggleDiscardCard = (cardId: string) => {
+    setDiscardSelection((current) => {
+      const next = new Set(current)
+      if (next.has(cardId)) next.delete(cardId)
+      else if (next.size < pendingDiscardCount) next.add(cardId)
+      return next
+    })
+  }
+
+  const confirmDiscard = () => {
+    const result = dispatch({ type: 'DISCARD_CARDS', playerId: HUMAN_PLAYER_ID, cardIds: [...discardSelection] })
+    if (result) setDiscardSelection(new Set())
+  }
+
   const primaryAction = () => {
+    if (pendingDiscardCount > 0) {
+      if (discardSelection.size === pendingDiscardCount) confirmDiscard()
+      return
+    }
     if (targetingId) {
       setTargetingId(null)
       setChosenTargets([])
@@ -774,6 +865,8 @@ export function PracticeMatch({ onExit, deck }: { onExit: () => void; deck: Save
   const actionLabel = useMemo(() => {
     if (game.winnerId) return game.winnerId === HUMAN_PLAYER_ID ? 'Victory' : 'Defeat'
     if (game.isDraw) return 'Draw game'
+    if (pendingDiscardCount > 0) return `Discard (${discardSelection.size}/${pendingDiscardCount})`
+    if (orderingAttackerId) return 'Choose damage order'
     if (targetingId) return 'Cancel target'
     if (selected) return selected.types.includes('land') ? 'Play land' : `Cast · ${selected.manaCost ?? selected.manaValue ?? 0}`
     if (game.phase === 'declare_attackers' && playerTurn && !game.combat.attackersDeclared) return `Declare attackers (${attackerSelection.size})`
@@ -786,7 +879,7 @@ export function PracticeMatch({ onExit, deck }: { onExit: () => void; deck: Save
     if (playerTurn && game.phase === 'main1') return 'To Combat'
     if (playerTurn && game.phase === 'main2') return 'End Turn'
     return 'Next'
-  }, [attackerSelection.size, blockAssignments, botThinking, game, playerHasPriority, playerTurn, selected, targetingId])
+  }, [attackerSelection.size, blockAssignments, botThinking, discardSelection.size, game, orderingAttackerId, pendingDiscardCount, playerHasPriority, playerTurn, selected, targetingId])
 
   const canSelectHandCard = (cardId: string): boolean => handCardAvailability(cardId).playable
 
@@ -805,6 +898,10 @@ export function PracticeMatch({ onExit, deck }: { onExit: () => void; deck: Save
     setBottomSelection(new Set())
     setOpenZone(null)
     setTimer(0)
+    setDiscardSelection(new Set())
+    setOrderingAttackerId(null)
+    setDamageOrderSelection([])
+    setOrderedAttackerIds(new Set())
     setToast('Review your opening hand')
     previousLife.current = { human: 20, bot: 20 }
     previousStackIds.current = new Set()
@@ -821,6 +918,14 @@ export function PracticeMatch({ onExit, deck }: { onExit: () => void; deck: Save
 
   const targetable = (target: TargetRef) => targetOptions.some((option) => targetEquals(option, target))
   const manaReady = (cardId: CardInstanceId) => checkAction(game, { type: 'TAP_FOR_MANA', playerId: HUMAN_PLAYER_ID, cardId }).legal
+  // Only highlight a defender as clickable when it can legally block whichever attacker is currently selected
+  // (flying/reach). Menace (needing 2+ blockers) is a set-level restriction, enforced on confirm instead.
+  const canBlockSelectedAttacker = (cardId: CardInstanceId): boolean => {
+    if (!blockingAttackerId) return true
+    const attackerInstance = game.cards[blockingAttackerId]
+    const blockerInstance = game.cards[cardId]
+    return Boolean(attackerInstance && blockerInstance && canBlockAttacker(attackerInstance, blockerInstance))
+  }
   const hiddenHand = game.players[BOT_PLAYER_ID].zones.hand
   const intentLinks = useMemo<IntentLink[]>(() => {
     const links: IntentLink[] = []
@@ -904,7 +1009,7 @@ export function PracticeMatch({ onExit, deck }: { onExit: () => void; deck: Save
             </div>
           </div>
           <div className="battle-row creature-row opponent-row" data-zone="Opponent creatures">
-            <AnimatePresence>{opponentCreatures.map((card, index) => <GameCard key={card.uid} card={card} zone="field" index={index} combatDirection={1} combatImpact={combatAnimating && (game.combat.attackers.includes(card.uid) || combatBlockerIds.has(card.uid))} eligible={targetable({ kind: 'permanent', cardId: card.uid }) || (game.phase === 'declare_blockers' && game.combat.attackers.includes(card.uid))} selected={card.uid === blockingAttackerId} onHover={() => { setInspectedId(card.uid); pauseAutoFlow() }} onClick={() => handleFieldCard(card, 'opponent')} onDoubleClick={() => setZoomed(card)} />)}</AnimatePresence>
+            <AnimatePresence>{opponentCreatures.map((card, index) => <GameCard key={card.uid} card={card} zone="field" index={index} combatDirection={1} combatImpact={combatAnimating && (game.combat.attackers.includes(card.uid) || combatBlockerIds.has(card.uid))} eligible={targetable({ kind: 'permanent', cardId: card.uid }) || (game.phase === 'declare_blockers' && game.combat.attackers.includes(card.uid)) || (orderingAttackerId !== null && orderingBlockerIds.includes(card.uid) && !damageOrderSelection.includes(card.uid))} selected={card.uid === blockingAttackerId} onHover={() => { setInspectedId(card.uid); pauseAutoFlow() }} onClick={() => handleFieldCard(card, 'opponent')} onDoubleClick={() => setZoomed(card)} />)}</AnimatePresence>
           </div>
         </div>
 
@@ -913,7 +1018,7 @@ export function PracticeMatch({ onExit, deck }: { onExit: () => void; deck: Save
 
         <div className="player-zone" onDragOver={(event) => event.preventDefault()} onDrop={handleDrop}>
           <div className="battle-row creature-row player-row" data-zone="Your creatures">
-            <AnimatePresence>{creatures.map((card, index) => <GameCard key={card.uid} card={card} zone="field" index={index} combatDirection={-1} combatImpact={combatAnimating && (game.combat.attackers.includes(card.uid) || combatBlockerIds.has(card.uid))} manaReady={manaReady(card.uid)} eligible={legalAttackerIds.has(card.uid) || targetable({ kind: 'permanent', cardId: card.uid }) || (game.phase === 'declare_blockers' && game.combat.defendingPlayerId === HUMAN_PLAYER_ID && !card.tapped)} selected={attackerSelection.has(card.uid) || Object.values(blockAssignments).some((ids) => ids.includes(card.uid))} onHover={() => { setInspectedId(card.uid); pauseAutoFlow() }} onClick={() => handleFieldCard(card, 'self')} onDoubleClick={() => setZoomed(card)} />)}</AnimatePresence>
+            <AnimatePresence>{creatures.map((card, index) => <GameCard key={card.uid} card={card} zone="field" index={index} combatDirection={-1} combatImpact={combatAnimating && (game.combat.attackers.includes(card.uid) || combatBlockerIds.has(card.uid))} manaReady={manaReady(card.uid)} eligible={legalAttackerIds.has(card.uid) || targetable({ kind: 'permanent', cardId: card.uid }) || (game.phase === 'declare_blockers' && game.combat.defendingPlayerId === HUMAN_PLAYER_ID && !game.combat.blockersDeclared && !card.tapped && canBlockSelectedAttacker(card.uid))} selected={attackerSelection.has(card.uid) || Object.values(blockAssignments).some((ids) => ids.includes(card.uid))} onHover={() => { setInspectedId(card.uid); pauseAutoFlow() }} onClick={() => handleFieldCard(card, 'self')} onDoubleClick={() => setZoomed(card)} />)}</AnimatePresence>
           </div>
           <div className="battle-row lands-row player-row" data-zone="Your resources">
             <div className="land-cluster">
@@ -1094,6 +1199,41 @@ export function PracticeMatch({ onExit, deck }: { onExit: () => void; deck: Save
                   : <button type="button" className="mulligan-keep" disabled={bottomSelection.size !== mulliganCount} onClick={confirmBottom}>Confirm {bottomSelection.size}/{mulliganCount} <ChevronRight /></button>}
               </div>
               <button type="button" className="mulligan-exit" onClick={onExit}><X /> Return to lobby</button>
+            </motion.div>
+          </motion.section>
+        )}
+      </AnimatePresence>
+      <AnimatePresence>
+        {pregame === 'done' && pendingDiscardCount > 0 && (
+          <motion.section className="mulligan-screen" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}>
+            <motion.div className="mulligan-panel" initial={{ y: 35, scale: .97 }} animate={{ y: 0, scale: 1 }} exit={{ y: 24, scale: .98 }}>
+              <div className="mulligan-heading">
+                <span>Maximum hand size</span>
+                <h1>Discard {pendingDiscardCount} card{pendingDiscardCount === 1 ? '' : 's'}</h1>
+                <p>You have more than {MAX_HAND_SIZE} cards in hand at cleanup. Select exactly {pendingDiscardCount} to discard.</p>
+              </div>
+              <p className="mulligan-hint">Click any card to read it up close, or hover to see it larger.</p>
+              <div className="mulligan-hand">
+                {sortedHand.map((card, index) => (
+                  <motion.button
+                    type="button"
+                    key={card.uid}
+                    className={`mulligan-card ${discardSelection.has(card.uid) ? 'chosen' : ''}`}
+                    onClick={() => toggleDiscardCard(card.uid)}
+                    onDoubleClick={() => setZoomed(card)}
+                    initial={{ opacity: 0, y: 55, rotate: (index - 3) * 2 }}
+                    animate={{ opacity: 1, y: discardSelection.has(card.uid) ? 17 : 0, rotate: (index - 3) * 1.2 }}
+                    transition={{ type: 'spring', stiffness: 270, damping: 24, delay: index * .045 }}
+                    whileHover={{ y: -22, scale: 1.16, zIndex: 10 }}
+                  >
+                    <img src={card.image} alt={card.name} />
+                    {discardSelection.has(card.uid) && <span>Discard</span>}
+                  </motion.button>
+                ))}
+              </div>
+              <div className="mulligan-actions">
+                <button type="button" className="mulligan-keep" disabled={discardSelection.size !== pendingDiscardCount} onClick={confirmDiscard}>Discard {discardSelection.size}/{pendingDiscardCount} <ChevronRight /></button>
+              </div>
             </motion.div>
           </motion.section>
         )}

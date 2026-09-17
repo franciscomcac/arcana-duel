@@ -368,4 +368,158 @@ describe('practice bot', () => {
       cardId: state.players.a.zones.hand[0],
     })
   })
+
+  it('casts a permanent whose enters-the-battlefield trigger has no legal target instead of skipping it', () => {
+    const relic: CardDefinition = {
+      id: 'relic',
+      name: 'Shattering Relic',
+      types: ['artifact'],
+      manaValue: 0,
+      entersEffects: [{ type: 'destroy', target: { kind: 'target-slot', index: 0, restriction: 'artifact-or-enchantment' } }],
+    }
+    const state = gameWithDecks([relic], [forest], 1)
+    state.phase = 'main1'
+    const decision = chooseBotAction(state, 'a')
+    expect(decision?.action).toEqual({
+      type: 'CAST_SPELL',
+      playerId: 'a',
+      cardId: state.players.a.zones.hand[0],
+      targets: [],
+    })
+  })
+})
+
+describe('discard to maximum hand size', () => {
+  it('forces the active player to discard down to seven cards at cleanup', () => {
+    const junk: CardDefinition = { id: 'junk', name: 'Junk', types: ['sorcery'], manaValue: 0 }
+    const state = gameWithDecks(Array.from({ length: 9 }, (_, index) => ({ ...junk, id: `junk-${index}`, name: `Junk ${index}` })), [], 9)
+    state.phase = 'end'
+    state.priorityPlayerId = 'a'
+    state.activePlayerId = 'a'
+
+    const enteredCleanup = reduceActions(state, [
+      { type: 'PASS_PRIORITY', playerId: 'a' },
+      { type: 'PASS_PRIORITY', playerId: 'b' },
+    ])
+    expect(enteredCleanup.state.phase).toBe('cleanup')
+    expect(enteredCleanup.state.pendingDiscard).toBe('a')
+    expect(gameReducer(enteredCleanup.state, { type: 'PASS_PRIORITY', playerId: 'a' }).error).toMatch(/discard/i)
+
+    const hand = enteredCleanup.state.players.a.zones.hand
+    const discard = gameReducer(enteredCleanup.state, { type: 'DISCARD_CARDS', playerId: 'a', cardIds: hand.slice(0, 2) })
+    expect(discard.accepted).toBe(true)
+    expect(discard.state.pendingDiscard).toBeNull()
+    expect(discard.state.players.a.zones.hand).toHaveLength(7)
+    expect(discard.state.players.a.zones.graveyard).toEqual(hand.slice(0, 2))
+  })
+
+  it('has the bot discard its lowest-value cards automatically', () => {
+    const weak: CardDefinition = { id: 'weak', name: 'Weak', types: ['creature'], manaValue: 1, power: 1, toughness: 1 }
+    const medium: CardDefinition = { id: 'medium', name: 'Medium', types: ['creature'], manaValue: 3, power: 3, toughness: 3 }
+    const state = gameWithDecks([], [], 0)
+    const handIds = ['weak', 'm1', 'm2', 'm3', 'm4', 'm5', 'm6', 'm7']
+    state.players.a.zones.hand = handIds
+    state.pendingDiscard = 'a'
+    // Build minimal card instances directly rather than drawing from a deck, to control value precisely.
+    const makeCard = (definition: CardDefinition, id: string) => ({
+      ...definition,
+      instanceId: id,
+      ownerId: 'a',
+      controllerId: 'a',
+      tapped: false,
+      counters: {},
+      damageMarked: 0,
+      summoningSick: false,
+      enteredTurn: 1,
+      temporaryPower: 0,
+      temporaryToughness: 0,
+      continuousPower: 0,
+      continuousToughness: 0,
+      attacking: false,
+      blocking: null,
+      token: false,
+    })
+    state.cards.weak = makeCard(weak, 'weak')
+    for (const id of handIds.slice(1)) state.cards[id] = makeCard(medium, id)
+    const decision = chooseBotAction(state, 'a')
+    expect(decision?.action.type).toBe('DISCARD_CARDS')
+    if (decision?.action.type === 'DISCARD_CARDS') {
+      expect(decision.action.cardIds).toEqual(['weak'])
+    }
+  })
+})
+
+describe('legend rule', () => {
+  it('keeps only one copy of a legendary permanent per controller', () => {
+    const legend: CardDefinition = {
+      id: 'legend',
+      name: 'Questing Beast',
+      types: ['creature'],
+      typeLine: 'Legendary Creature - Beast',
+      power: 4,
+      toughness: 4,
+    }
+    const state = gameWithDecks([legend, legend], [], 0)
+    const [firstId, secondId] = state.players.a.zones.library
+    state.players.a.zones.library = []
+    state.players.a.zones.battlefield = [firstId, secondId]
+    state.cards[firstId].enteredTurn = 1
+    state.cards[secondId].enteredTurn = 2
+    const next = runStateBasedActions(state)
+
+    expect(next.players.a.zones.battlefield).toEqual([secondId])
+    expect(next.players.a.zones.graveyard).toEqual([firstId])
+  })
+
+  it('does not affect two different legendary permanents', () => {
+    const beast: CardDefinition = { id: 'beast', name: 'Questing Beast', types: ['creature'], typeLine: 'Legendary Creature - Beast', power: 4, toughness: 4 }
+    const cleave: CardDefinition = { id: 'cleave', name: 'Embercleave', types: ['artifact'], typeLine: 'Legendary Artifact - Equipment' }
+    const state = gameWithDecks([beast, cleave], [], 0)
+    const [beastId, cleaveId] = state.players.a.zones.library
+    state.players.a.zones.library = []
+    state.players.a.zones.battlefield = [beastId, cleaveId]
+    const next = runStateBasedActions(state)
+
+    expect(next.players.a.zones.battlefield).toEqual(expect.arrayContaining([beastId, cleaveId]))
+    expect(next.players.a.zones.graveyard).toEqual([])
+  })
+})
+
+describe('attacker-chosen damage order', () => {
+  it('lets the attacking player reorder declared blockers before damage', () => {
+    const ogre: CardDefinition = { id: 'ogre', name: 'Ogre', types: ['creature'], power: 2, toughness: 2 }
+    const goat: CardDefinition = { id: 'goat', name: 'Goat', types: ['creature'], power: 1, toughness: 1 }
+    const wall: CardDefinition = { id: 'wall', name: 'Wall', types: ['creature'], power: 0, toughness: 3 }
+    const state = gameWithDecks([ogre], [goat, wall])
+    const attackerId = state.players.a.zones.library[0]
+    const [goatId, wallId] = state.players.b.zones.library
+    state.players.a.zones.library = []
+    state.players.b.zones.library = []
+    state.players.a.zones.battlefield = [attackerId]
+    state.players.b.zones.battlefield = [goatId, wallId]
+    state.cards[attackerId].summoningSick = false
+    state.cards[goatId].summoningSick = false
+    state.cards[wallId].summoningSick = false
+    state.phase = 'declare_attackers'
+    state.combat.defendingPlayerId = 'b'
+
+    const blocked = reduceActions(state, [
+      { type: 'DECLARE_ATTACKERS', playerId: 'a', attackerIds: [attackerId] },
+      { type: 'PASS_PRIORITY', playerId: 'a' },
+      { type: 'PASS_PRIORITY', playerId: 'b' },
+      { type: 'DECLARE_BLOCKERS', playerId: 'b', assignments: { [attackerId]: [wallId, goatId] } },
+    ])
+    expect(blocked.accepted).toBe(true)
+    // The defender declared wall-then-goat; the attacker reorders to kill the goat first with overflow onto the wall.
+    const reordered = gameReducer(blocked.state, { type: 'ORDER_BLOCKERS', playerId: 'a', attackerId, order: [goatId, wallId] })
+    expect(reordered.accepted).toBe(true)
+    expect(reordered.state.combat.blockers[attackerId]).toEqual([goatId, wallId])
+
+    const damageDealt = reduceActions(reordered.state, [
+      { type: 'PASS_PRIORITY', playerId: 'a' },
+      { type: 'PASS_PRIORITY', playerId: 'b' },
+    ])
+    expect(damageDealt.state.players.b.zones.graveyard).toContain(goatId)
+    expect(damageDealt.state.players.b.zones.battlefield).toContain(wallId)
+  })
 })

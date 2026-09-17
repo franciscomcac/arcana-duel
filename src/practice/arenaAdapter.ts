@@ -1,9 +1,11 @@
 import type { CatalogCard, SavedDeck } from '../catalog'
 import { expandDeckCards } from '../catalog'
 import {
+  anyLegalTargetExists,
   canPayMana,
   checkAction,
   createGame,
+  entersTargetSlotIndices,
   gameReducer,
   getManaProduction,
   getPower,
@@ -48,9 +50,18 @@ function cardTypes(card: CatalogCard): CardType[] {
 
 function manaProduction(card: CatalogCard): Partial<Record<ManaColor, number>> | undefined {
   const result: Partial<Record<ManaColor, number>> = {}
-  for (const match of card.rules.matchAll(/add\s+\{([WUBRGC])\}/gi)) {
-    const color = match[1].toLocaleUpperCase() as ManaColor
-    result[color] = Math.max(1, result[color] ?? 0)
+  // Lands' mana abilities can use "Add {X} or {Y}" alternation (e.g. Rockfall Vale); other cards keep the
+  // stricter "add" immediately before the symbol so a combat trigger like "add {R} or {G}" (Kessig
+  // Naturalist) isn't mistaken for a tap-for-mana ability.
+  const pattern = card.kind === 'land'
+    ? /add\s+\{([WUBRGC])\}(?:\s+or\s+\{([WUBRGC])\})?/gi
+    : /add\s+\{([WUBRGC])\}/gi
+  for (const match of card.rules.matchAll(pattern)) {
+    for (const group of match.slice(1)) {
+      if (!group) continue
+      const color = group.toLocaleUpperCase() as ManaColor
+      result[color] = Math.max(1, result[color] ?? 0)
+    }
   }
   if (card.kind === 'land' && !Object.keys(result).length) {
     for (const symbol of card.mana.toLocaleUpperCase().match(/[WUBRGC]/g) ?? []) {
@@ -204,6 +215,7 @@ export function catalogCardToDefinition(card: CatalogCard): CardDefinition {
     effects,
     entersEffects,
     imageUri: card.image,
+    legendary: /\blegendary\b/i.test(card.typeLine),
   }
 }
 
@@ -341,6 +353,24 @@ export function requiredTargetCount(card: CardInstance): number {
   return count
 }
 
+/**
+ * The number of targets that actually must be supplied to cast this card right now. Differs from
+ * requiredTargetCount() when a target slot only comes from an enters-the-battlefield trigger (e.g.
+ * Reclamation Sage's "destroy target artifact or enchantment") and no legal target currently exists -
+ * rule 603.3c lets that trigger simply fizzle instead of blocking the cast.
+ */
+export function castTargetCount(state: GameState, playerId: PlayerId, card: CardInstance): number {
+  const softIndices = entersTargetSlotIndices(card)
+  let count = 0
+  for (const effect of [...(card.effects ?? []), ...(card.entersEffects ?? [])]) {
+    if (!('target' in effect) || effect.target.kind !== 'target-slot') continue
+    const index = effect.target.index
+    if (softIndices.has(index) && !anyLegalTargetExists(state, effect.target.restriction, playerId)) continue
+    count = Math.max(count, index + 1)
+  }
+  return count
+}
+
 function manaStateKey(state: GameState, playerId: PlayerId): string {
   const player = state.players[playerId]
   const tapped = player.zones.battlefield.filter((id) => state.cards[id].tapped).sort().join(',')
@@ -382,7 +412,7 @@ export function castWithAutomaticMana(state: GameState, playerId: PlayerId, card
   if (!card || !state.players[playerId]?.zones.hand.includes(cardId)) {
     return { state, accepted: false, error: 'That card is not in your hand.', actions: [] }
   }
-  if (targets.length < requiredTargetCount(card)) {
+  if (targets.length < castTargetCount(state, playerId, card)) {
     return { state, accepted: false, error: 'Choose all required targets before casting.', actions: [] }
   }
   const manaActions = findManaActions(state, playerId, card.manaCost)
@@ -412,7 +442,7 @@ export function legalTargets(state: GameState, playerId: PlayerId, cardId: CardI
   const card = state.cards[cardId]
   if (!card) return []
   const slot = selected.length
-  if (slot >= requiredTargetCount(card)) return []
+  if (slot >= castTargetCount(state, playerId, card)) return []
   const relevant = [...(card.effects ?? []), ...(card.entersEffects ?? [])].filter((effect) => 'target' in effect && effect.target.kind === 'target-slot' && effect.target.index === slot)
   const needsStack = relevant.some((effect) => effect.type === 'counter_stack_item')
   const needsPermanent = relevant.some((effect) => ['destroy', 'exile', 'return_to_hand', 'tap', 'untap', 'modify_stats', 'add_counter', 'remove_counter'].includes(effect.type))

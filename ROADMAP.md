@@ -10,20 +10,20 @@ Legend: 🟢 small · 🟡 medium · 🔴 large
 ## Phase 1 — Correctness quick fixes (practice mode)
 Cheap, contained, high-confidence fixes. Do these first.
 
-- [ ] 🟢 Rockfall Vale only ever produces {R}, never {G} — mana-production regex
+- [x] 🟢 Rockfall Vale only ever produces {R}, never {G} — mana-production regex
       in `arenaAdapter.ts` doesn't catch "Add {R} or {G}" alternation.
-- [ ] 🟡 Reclamation Sage can get stuck in an uncastable "choose a target" dead
+- [x] 🟡 Reclamation Sage can get stuck in an uncastable "choose a target" dead
       end when no artifact/enchantment exists — optional ETB treated as a hard
       cast requirement. Also fix the bot's separate, narrower "needs target"
       check so it can actually cast this card.
-- [ ] 🟡 Blocker-selection UI doesn't check flying/reach/menace before
+- [x] 🟡 Blocker-selection UI doesn't check flying/reach/menace before
       highlighting a defender as clickable — only the final submit is
       validated, so illegal block sets bounce with one confusing error and no
       indication which assignment was bad.
-- [ ] 🟡 Attacker doesn't get to choose damage-assignment order when
+- [x] 🟡 Attacker doesn't get to choose damage-assignment order when
       double-blocked (currently follows defender's declared block order).
-- [ ] 🟢 No max hand size / discard-to-7 step in cleanup.
-- [ ] 🟢 No legend rule (bites specifically with Questing Beast x2 / Embercleave
+- [x] 🟢 No max hand size / discard-to-7 step in cleanup.
+- [x] 🟢 No legend rule (bites specifically with Questing Beast x2 / Embercleave
       x2, both in the 14-card catalog).
 - [ ] 🟢 Questing Beast catalog text is missing 3 of its 4 real abilities
       (can't-be-blocked-by-power-2-or-less, damage-can't-be-prevented, attack

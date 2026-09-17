@@ -1,4 +1,4 @@
-import { canPayMana, checkAction, gameReducer, getManaProduction, getPower, getToughness, matchesTargetRestriction } from './game'
+import { canBlockAttacker, canPayMana, checkAction, entersTargetSlotIndices, gameReducer, getManaProduction, getPower, getToughness, matchesTargetRestriction } from './game'
 import type {
   CardInstance,
   CardInstanceId,
@@ -101,15 +101,21 @@ function requiredTargetCount(effects: EngineEffect[]): number {
   return count
 }
 
-export function chooseTargets(state: GameState, playerId: PlayerId, effects: EngineEffect[]): TargetRef[] | null {
+export function chooseTargets(state: GameState, playerId: PlayerId, effects: EngineEffect[], softIndices: Set<number> = new Set()): TargetRef[] | null {
   const result: TargetRef[] = Array.from({ length: requiredTargetCount(effects) })
   for (const effect of effects) {
     if (!('target' in effect) || effect.target.kind !== 'target-slot') continue
     const chosen = targetForEffect(state, playerId, effect)
-    if (!chosen) return null
-    result[effect.target.index] = chosen
+    if (chosen) {
+      result[effect.target.index] = chosen
+      continue
+    }
+    // An enters-the-battlefield trigger with no legal target simply fizzles (rule 603.3c) - it never
+    // blocks casting the permanent, so leave that slot empty instead of failing the whole cast.
+    if (!softIndices.has(effect.target.index)) return null
   }
-  return result.every(Boolean) ? result : null
+  while (result.length > 0 && result[result.length - 1] === undefined) result.pop()
+  return result
 }
 
 function castCandidates(state: GameState, playerId: PlayerId, usePotentialMana: boolean): Array<{ action: GameAction; card: CardInstance }> {
@@ -118,8 +124,10 @@ function castCandidates(state: GameState, playerId: PlayerId, usePotentialMana: 
     .map((id) => state.cards[id])
     .filter((card) => !card.types.includes('land'))
     .map((card) => {
-      const targets = chooseTargets(state, playerId, card.effects ?? [])
-      const needsTargets = requiredTargetCount(card.effects ?? []) > 0
+      const effects = [...(card.effects ?? []), ...(card.entersEffects ?? [])]
+      const softIndices = entersTargetSlotIndices(card)
+      const targets = chooseTargets(state, playerId, effects, softIndices)
+      const needsTargets = requiredTargetCount(effects) > 0
       return {
         card,
         action: { type: 'CAST_SPELL', playerId, cardId: card.instanceId, targets: targets ?? undefined } as GameAction,
@@ -221,12 +229,8 @@ export function chooseBlocks(state: GameState, playerId: PlayerId): Record<CardI
     .sort((left, right) => getPower(right) - getPower(left) || left.instanceId.localeCompare(right.instanceId))
 
   for (const attacker of attackers) {
-    const canBlock = (blocker: CardInstance) => {
-      if ((attacker.keywords ?? []).includes('flying') && !(blocker.keywords ?? []).some((keyword) => keyword === 'flying' || keyword === 'reach')) return false
-      return true
-    }
     const needed = (attacker.keywords ?? []).includes('menace') ? 2 : 1
-    const candidates = available.filter(canBlock)
+    const candidates = available.filter((blocker) => canBlockAttacker(attacker, blocker))
     if (candidates.length < needed) continue
     const selected: CardInstance[] = []
     while (selected.length < needed) {
@@ -245,6 +249,14 @@ export function chooseBotAction(state: GameState, playerId: PlayerId): BotDecisi
   const player = state.players[playerId]
   if (!player || player.lost || state.winnerId || state.isDraw) return null
 
+  if (state.pendingDiscard === playerId) {
+    const required = player.zones.hand.length - 7
+    const cardIds = [...player.zones.hand]
+      .sort((left, right) => cardValue(state.cards[left]) - cardValue(state.cards[right]))
+      .slice(0, Math.max(0, required))
+    return { action: { type: 'DISCARD_CARDS', playerId, cardIds }, reason: 'Discard the lowest-value cards down to the maximum hand size.' }
+  }
+
   if (state.phase === 'declare_attackers' && state.activePlayerId === playerId && !state.combat.attackersDeclared) {
     const attackerIds = chooseAttackers(state, playerId)
     return { action: { type: 'DECLARE_ATTACKERS', playerId, attackerIds }, reason: attackerIds.length ? 'Attack with favorable creatures.' : 'Declare no attackers.' }
@@ -254,6 +266,20 @@ export function chooseBotAction(state: GameState, playerId: PlayerId): BotDecisi
     return { action: { type: 'DECLARE_BLOCKERS', playerId, assignments }, reason: Object.keys(assignments).length ? 'Make deterministic favorable blocks.' : 'Declare no blockers.' }
   }
   if (state.priorityPlayerId !== playerId) return null
+
+  if (state.phase === 'declare_blockers' && state.combat.blockersDeclared && state.activePlayerId === playerId) {
+    for (const attackerId of state.combat.attackers) {
+      const attacker = state.cards[attackerId]
+      if (!attacker || attacker.controllerId !== playerId) continue
+      const blockers = state.combat.blockers[attackerId] ?? []
+      if (blockers.length < 2) continue
+      // Default policy: assign damage to the cheapest blocker first so it dies before the more expensive one.
+      const order = [...blockers].sort((left, right) => getToughness(state.cards[left]) - getToughness(state.cards[right]) || left.localeCompare(right))
+      if (order.some((id, index) => id !== blockers[index])) {
+        return { action: { type: 'ORDER_BLOCKERS', playerId, attackerId, order }, reason: `Order damage on ${attacker.name} to kill the cheapest blocker first.` }
+      }
+    }
+  }
 
   if (playerId === state.activePlayerId && ['main1', 'main2'].includes(state.phase) && !state.stack.length) {
     const land = player.zones.hand

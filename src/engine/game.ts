@@ -1,5 +1,6 @@
 import {
   EMPTY_MANA_POOL,
+  MAX_HAND_SIZE,
   PHASES,
   type ActionResult,
   type CardDefinition,
@@ -217,6 +218,7 @@ export function createGame(options: CreateGameOptions): GameState {
     eventSequence: 0,
     stackSequence: 0,
     events: [],
+    pendingDiscard: null,
   }
 
   for (const setup of options.players) {
@@ -258,10 +260,12 @@ function makeInstance(
   enteredTurn: number,
   token: boolean,
 ): CardInstance {
+  const typeLine = deriveTypeLine(definition)
   return {
     ...definition,
     types: [...definition.types],
-    typeLine: deriveTypeLine(definition),
+    typeLine,
+    legendary: definition.legendary ?? /\blegendary\b/i.test(typeLine),
     keywords: [...(definition.keywords ?? [])],
     producesMana: definition.producesMana ? { ...definition.producesMana } : undefined,
     effects: definition.effects?.map(cloneEffect),
@@ -284,8 +288,14 @@ function makeInstance(
   }
 }
 
-function hasKeyword(card: CardInstance, keyword: string): boolean {
+export function hasKeyword(card: CardInstance, keyword: string): boolean {
   return (card.keywords ?? []).some((value) => value.toLowerCase() === keyword)
+}
+
+/** Flying/reach legality only (rule 509.1b) - menace is a property of the whole blocker set, checked separately. */
+export function canBlockAttacker(attacker: CardInstance, blocker: CardInstance): boolean {
+  if (hasKeyword(attacker, 'flying') && !hasKeyword(blocker, 'flying') && !hasKeyword(blocker, 'reach')) return false
+  return true
 }
 
 export function getPower(card: CardInstance): number {
@@ -379,7 +389,7 @@ export function checkAction(state: GameState, action: GameAction): LegalityResul
   if (!state.started || state.winnerId || state.isDraw) return { legal: false, reason: 'The game is over.' }
   const player = state.players[action.playerId]
   if (!player || player.lost) return { legal: false, reason: 'That player cannot act.' }
-  if (action.type !== 'CONCEDE' && action.type !== 'DECLARE_ATTACKERS' && action.type !== 'DECLARE_BLOCKERS') {
+  if (action.type !== 'CONCEDE' && action.type !== 'DECLARE_ATTACKERS' && action.type !== 'DECLARE_BLOCKERS' && action.type !== 'DISCARD_CARDS') {
     const gate = declarationGate(state)
     if (!gate.legal) return gate
   }
@@ -418,7 +428,13 @@ export function checkAction(state: GameState, action: GameAction): LegalityResul
         return { legal: false, reason: 'That spell requires sorcery timing.' }
       }
       if (!canPayMana(player.manaPool, card.manaCost, action.xValue)) return { legal: false, reason: 'The player cannot pay that mana cost.' }
-      const targetError = validateEffectTargets(state, [...(card.effects ?? []), ...(card.entersEffects ?? [])], action.targets ?? [], action.playerId)
+      const targetError = validateEffectTargets(
+        state,
+        [...(card.effects ?? []), ...(card.entersEffects ?? [])],
+        action.targets ?? [],
+        action.playerId,
+        entersTargetSlotIndices(card),
+      )
       return targetError ? { legal: false, reason: targetError } : { legal: true }
     }
     case 'ACTIVATE_ABILITY': {
@@ -435,10 +451,31 @@ export function checkAction(state: GameState, action: GameAction): LegalityResul
       return checkAttackers(state, action.playerId, action.attackerIds, action.defenderId)
     case 'DECLARE_BLOCKERS':
       return checkBlockers(state, action.playerId, action.assignments)
+    case 'ORDER_BLOCKERS': {
+      if (state.phase !== 'declare_blockers' || !state.combat.blockersDeclared) return { legal: false, reason: 'Blockers must be declared before damage order can be set.' }
+      const attacker = state.cards[action.attackerId]
+      if (!attacker || attacker.controllerId !== action.playerId || !state.combat.attackers.includes(action.attackerId)) return { legal: false, reason: 'That attacker is not controlled by the player.' }
+      const current = state.combat.blockers[action.attackerId] ?? []
+      if (current.length < 2) return { legal: false, reason: 'Damage order only matters with two or more blockers.' }
+      if (action.order.length !== current.length || new Set(action.order).size !== current.length || !action.order.every((id) => current.includes(id))) {
+        return { legal: false, reason: 'The chosen order must include exactly the declared blockers.' }
+      }
+      return { legal: true }
+    }
+    case 'DISCARD_CARDS': {
+      if (state.pendingDiscard !== action.playerId) return { legal: false, reason: 'That player has nothing to discard right now.' }
+      const required = player.zones.hand.length - MAX_HAND_SIZE
+      if (action.cardIds.length !== required) return { legal: false, reason: `Choose exactly ${required} card(s) to discard.` }
+      if (new Set(action.cardIds).size !== action.cardIds.length || action.cardIds.some((id) => !player.zones.hand.includes(id))) {
+        return { legal: false, reason: 'That discard selection is invalid.' }
+      }
+      return { legal: true }
+    }
   }
 }
 
 function declarationGate(state: GameState): LegalityResult {
+  if (state.pendingDiscard) return { legal: false, reason: `${state.players[state.pendingDiscard]?.name ?? 'A player'} must discard down to the maximum hand size.` }
   if (state.phase === 'declare_attackers' && !state.combat.attackersDeclared) return { legal: false, reason: 'Attackers must be declared, even if the set is empty.' }
   if (state.phase === 'declare_blockers' && !state.combat.blockersDeclared) return { legal: false, reason: 'Blockers must be declared, even if the set is empty.' }
   return { legal: true }
@@ -446,6 +483,7 @@ function declarationGate(state: GameState): LegalityResult {
 
 function validateTargets(state: GameState, targets: TargetRef[]): string | undefined {
   for (const target of targets) {
+    if (!target) continue // an empty slot left by an omitted optional (fizzling) enters-the-battlefield target
     if (target.kind === 'player' && (!state.players[target.playerId] || state.players[target.playerId].lost)) return 'A player target is invalid.'
     if (target.kind === 'permanent' && !Object.values(state.players).some((player) => player.zones.battlefield.includes(target.cardId))) return 'A permanent target is invalid.'
     if (target.kind === 'stack' && !state.stack.some((item) => item.id === target.stackItemId)) return 'A stack target is invalid.'
@@ -474,13 +512,34 @@ export function matchesTargetRestriction(
   return card.types.includes(restriction)
 }
 
-function validateEffectTargets(state: GameState, effects: EngineEffect[], targets: TargetRef[], controllerId: PlayerId): string | undefined {
+/** Target-slot indices sourced only from a permanent's enters-the-battlefield trigger (rule 603.3c: fizzles harmlessly with no legal target, never blocks casting the permanent itself). */
+export function entersTargetSlotIndices(card: CardInstance): Set<number> {
+  const indices = new Set<number>()
+  for (const effect of card.entersEffects ?? []) {
+    if ('target' in effect && effect.target.kind === 'target-slot') indices.add(effect.target.index)
+  }
+  return indices
+}
+
+/** Whether any permanent or player on the battlefield/in the game currently satisfies a target restriction. */
+export function anyLegalTargetExists(state: GameState, restriction: TargetRestriction | undefined, controllerId: PlayerId): boolean {
+  const permanentIds = state.playerOrder.flatMap((id) => state.players[id].zones.battlefield)
+  if (permanentIds.some((cardId) => matchesTargetRestriction(state, { kind: 'permanent', cardId }, restriction, controllerId))) return true
+  if (state.playerOrder.some((id) => matchesTargetRestriction(state, { kind: 'player', playerId: id }, restriction, controllerId))) return true
+  if (state.stack.some((item) => matchesTargetRestriction(state, { kind: 'stack', stackItemId: item.id }, restriction, controllerId))) return true
+  return false
+}
+
+function validateEffectTargets(state: GameState, effects: EngineEffect[], targets: TargetRef[], controllerId: PlayerId, softIndices: Set<number> = new Set()): string | undefined {
   const basicError = validateTargets(state, targets)
   if (basicError) return basicError
   for (const effect of effects) {
     if (!('target' in effect) || effect.target.kind !== 'target-slot') continue
     const target = targets[effect.target.index]
-    if (!target) return `Target ${effect.target.index + 1} is required.`
+    if (!target) {
+      if (softIndices.has(effect.target.index) && !anyLegalTargetExists(state, effect.target.restriction, controllerId)) continue
+      return `Target ${effect.target.index + 1} is required.`
+    }
     if (!matchesTargetRestriction(state, target, effect.target.restriction, controllerId)) return 'That object is not a legal target for this effect.'
     if (effect.type === 'counter_stack_item' && target.kind !== 'stack') return 'A counter effect must target a stack item.'
     if (['destroy', 'exile', 'return_to_hand', 'tap', 'untap', 'modify_stats', 'add_counter', 'remove_counter'].includes(effect.type) && target.kind !== 'permanent') {
@@ -520,7 +579,7 @@ function checkBlockers(state: GameState, playerId: PlayerId, assignments: Record
       seen.add(blockerId)
       const blocker = state.cards[blockerId]
       if (!blocker || blocker.controllerId !== playerId || !state.players[playerId].zones.battlefield.includes(blockerId) || !blocker.types.includes('creature') || blocker.tapped) return { legal: false, reason: 'Every blocker must be an untapped creature controlled by the defending player.' }
-      if (hasKeyword(attacker, 'flying') && !hasKeyword(blocker, 'flying') && !hasKeyword(blocker, 'reach')) return { legal: false, reason: `${blocker.name} cannot block a creature with flying.` }
+      if (!canBlockAttacker(attacker, blocker)) return { legal: false, reason: `${blocker.name} cannot block a creature with flying.` }
     }
   }
   return { legal: true }
@@ -625,6 +684,18 @@ export function gameReducer(state: GameState, action: GameAction): ActionResult 
       next.priorityPlayerId = next.activePlayerId
       next.consecutivePasses = 0
       addEvent(next, 'blockers', `${player.name} declared blockers.`, { playerId: action.playerId })
+      break
+    }
+    case 'ORDER_BLOCKERS': {
+      next.combat.blockers[action.attackerId] = [...action.order]
+      next.consecutivePasses = 0
+      addEvent(next, 'order_blockers', `${player.name} set the damage order for ${next.cards[action.attackerId]?.name ?? 'an attacker'}.`, { playerId: action.playerId, cardId: action.attackerId })
+      break
+    }
+    case 'DISCARD_CARDS': {
+      for (const cardId of action.cardIds) moveCard(next, cardId, action.playerId, 'graveyard')
+      next.pendingDiscard = null
+      addEvent(next, 'discard', `${player.name} discarded ${action.cardIds.length} card(s) to the maximum hand size.`, { playerId: action.playerId })
       break
     }
     case 'PASS_PRIORITY':
@@ -865,6 +936,8 @@ function cleanupTurn(state: GameState): void {
     delete card.counters.__deathtouch_damage
   }
   clearCombat(state)
+  const activePlayer = state.players[state.activePlayerId]
+  if (activePlayer && activePlayer.zones.hand.length > MAX_HAND_SIZE) state.pendingDiscard = state.activePlayerId
 }
 
 function clearCombat(state: GameState): void {
@@ -979,6 +1052,44 @@ function applyStateBasedActions(next: GameState): GameState {
           }
           changed = true
           addEvent(next, 'creature_died', `${card.name} died.`, { playerId: card.controllerId, cardId })
+        }
+      }
+    }
+    for (const player of Object.values(next.players)) {
+      const legendaryByName = new Map<string, CardInstanceId[]>()
+      for (const cardId of player.zones.battlefield) {
+        const card = next.cards[cardId]
+        if (!card?.legendary) continue
+        const group = legendaryByName.get(card.name) ?? []
+        group.push(cardId)
+        legendaryByName.set(card.name, group)
+      }
+      for (const [name, group] of legendaryByName) {
+        if (group.length < 2) continue
+        // Rule 704.5j: the controller keeps one. No interactive chooser exists yet, so this picks a
+        // deterministic "best" copy (most keywords, then highest power, then most recently entered).
+        const keeperId = group.reduce((bestId, candidateId) => {
+          const best = next.cards[bestId]
+          const candidate = next.cards[candidateId]
+          const bestScore = (best.keywords ?? []).length
+          const candidateScore = (candidate.keywords ?? []).length
+          if (candidateScore !== bestScore) return candidateScore > bestScore ? candidateId : bestId
+          if (getPower(candidate) !== getPower(best)) return getPower(candidate) > getPower(best) ? candidateId : bestId
+          if (candidate.enteredTurn !== best.enteredTurn) return candidate.enteredTurn > best.enteredTurn ? candidateId : bestId
+          return candidateId.localeCompare(bestId) > 0 ? candidateId : bestId
+        }, group[0])
+        for (const cardId of group) {
+          if (cardId === keeperId) continue
+          const card = next.cards[cardId]
+          if (card.token) {
+            const index = player.zones.battlefield.indexOf(cardId)
+            if (index >= 0) player.zones.battlefield.splice(index, 1)
+            delete next.cards[cardId]
+          } else {
+            moveCard(next, cardId, card.ownerId, 'graveyard')
+          }
+          changed = true
+          addEvent(next, 'legend_rule', `${name} was put into the graveyard because of the legend rule.`, { playerId: player.id, cardId })
         }
       }
     }
