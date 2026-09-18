@@ -42,18 +42,18 @@ Contained to `bot.ts`; makes solo play meaningfully less exploitable.
 ## Phase 3 — Visual quick wins
 Cheap, high-visibility, don't require touching the engine.
 
-- [ ] 🟡 Lobby renders in the wrong font — three overlapping CSS passes from
+- [x] 🟡 Lobby renders in the wrong font — three overlapping CSS passes from
       different points in the project's history are stacked in styles.css;
       the last one silently wins and swaps Cinzel for Inter on the Lobby only.
       Needs deleting the superseded pass(es), not just patching values.
-- [ ] 🟡 Mana pip icons (Lucide flame/leaf outline icons at 9-11px) read as
+- [x] 🟡 Mana pip icons (Lucide flame/leaf outline icons at 9-11px) read as
       fuzzy squiggles at actual render size — every single card shows one.
-- [ ] 🟡 Below ~820px width the mana-availability readout is just hidden with
+- [x] 🟡 Below ~820px width the mana-availability readout is just hidden with
       nothing replacing it; below 1120px the card inspector disappears with
       no fallback (double-click zoom still works but isn't taught).
-- [ ] 🟡 Land piles fan out individually instead of collapsing into one
+- [x] 🟡 Land piles fan out individually instead of collapsing into one
       stacked pile with a count badge — sprawls badly with 5+ of a kind.
-- [ ] 🟢 Mana-cost badge shown redundantly on permanents already in play
+- [x] 🟢 Mana-cost badge shown redundantly on permanents already in play
       (lands included) — should be suppressed once a card is on the
       battlefield.
 

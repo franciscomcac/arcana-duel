@@ -129,9 +129,9 @@ function IntentLines({ links }: { links: IntentLink[] }) {
 }
 
 function manaIcon(card: CardData) {
-  if (card.color === 'red') return <Flame size={11} />
-  if (card.color === 'green') return <Leaf size={11} />
-  if (card.color === 'gold') return <><Flame size={9} /><Leaf size={9} /></>
+  if (card.color === 'red') return <Flame size={14} strokeWidth={2.5} />
+  if (card.color === 'green') return <Leaf size={14} strokeWidth={2.5} />
+  if (card.color === 'gold') return <><Flame size={10} strokeWidth={2.5} /><Leaf size={10} strokeWidth={2.5} /></>
   return <span>{card.cost}</span>
 }
 
@@ -178,7 +178,7 @@ function GameCard({ card, zone, selected, eligible, manaReady, disabled, onClick
         <span className="card-edge" aria-hidden="true" />
         <span className="card-glint" aria-hidden="true" />
       </span>
-      {zone !== 'preview' && <span className={`mana-badge ${card.color}`}>{manaIcon(card)}</span>}
+      {zone !== 'preview' && zone !== 'field' && <span className={`mana-badge ${card.color}`}>{manaIcon(card)}</span>}
       {stats && zone === 'field' && <span className="stat-badge">{stats}</span>}
       {card.summoningSick && zone === 'field' && <span className="sick-badge" title="Summoning sickness"><Clock3 size={11} /></span>}
       {zone === 'field' && card.buff && <span className="buff-badge">{card.buff > 0 ? '+' : ''}{card.buff}</span>}
@@ -980,6 +980,12 @@ export function PracticeMatch({ onExit, deck }: { onExit: () => void; deck: Save
         </div>
       </aside>
 
+      <button type="button" className="inspector-peek" onClick={() => setZoomed(inspected)} title="View full card text" aria-label={`View full card text for ${inspected.name}`}>
+        <Eye size={12} />
+        <b>{inspected.name}</b>
+        <small>Tap to view text</small>
+      </button>
+
       <section className="playmat">
         <div className="board-inscription top">ARCANA · RULES ARENA · ARCANA</div>
         <div className={`damage-vignette top ${damagePulse === 'opponent' ? 'show' : ''}`} />
@@ -1001,7 +1007,8 @@ export function PracticeMatch({ onExit, deck }: { onExit: () => void; deck: Save
           <div className="battle-row lands-row opponent-row" data-zone="Opponent resources">
             <div className="land-cluster">
               {opponentLandPiles.map((pile) => <div className={`land-pile ${pile[0].tapped ? 'is-tapped' : ''}`} key={`${pile[0].oracleName}-${pile[0].tapped ? 'tapped' : 'ready'}`}>
-                <AnimatePresence>{pile.map((card, index) => <GameCard key={card.uid} card={card} zone="field" index={index} eligible={targetable({ kind: 'permanent', cardId: card.uid })} onHover={() => { setInspectedId(card.uid); pauseAutoFlow() }} onClick={() => handleFieldCard(card, 'opponent')} onDoubleClick={() => setZoomed(card)} />)}</AnimatePresence>
+                <AnimatePresence>{pile.slice(0, 2).map((card, index) => <GameCard key={card.uid} card={card} zone="field" index={index} eligible={targetable({ kind: 'permanent', cardId: card.uid })} onHover={() => { setInspectedId(card.uid); pauseAutoFlow() }} onClick={() => handleFieldCard(card, 'opponent')} onDoubleClick={() => setZoomed(card)} />)}</AnimatePresence>
+                {pile.length > 1 && <span className="pile-count">×{pile.length}</span>}
               </div>)}
             </div>
             <div className="other-permanent-cluster">
@@ -1023,7 +1030,8 @@ export function PracticeMatch({ onExit, deck }: { onExit: () => void; deck: Save
           <div className="battle-row lands-row player-row" data-zone="Your resources">
             <div className="land-cluster">
               {playerLandPiles.map((pile) => <div className={`land-pile ${pile[0].tapped ? 'is-tapped' : ''}`} key={`${pile[0].oracleName}-${pile[0].tapped ? 'tapped' : 'ready'}`}>
-                <AnimatePresence>{pile.map((card, index) => <GameCard key={card.uid} card={card} zone="field" index={index} manaReady={manaReady(card.uid)} eligible={targetable({ kind: 'permanent', cardId: card.uid })} onHover={() => { setInspectedId(card.uid); pauseAutoFlow() }} onClick={() => handleFieldCard(card, 'self')} onDoubleClick={() => setZoomed(card)} />)}</AnimatePresence>
+                <AnimatePresence>{pile.slice(0, 2).map((card, index) => <GameCard key={card.uid} card={card} zone="field" index={index} manaReady={manaReady(card.uid)} eligible={targetable({ kind: 'permanent', cardId: card.uid })} onHover={() => { setInspectedId(card.uid); pauseAutoFlow() }} onClick={() => handleFieldCard(card, 'self')} onDoubleClick={() => setZoomed(card)} />)}</AnimatePresence>
+                {pile.length > 1 && <span className="pile-count">×{pile.length}</span>}
               </div>)}
             </div>
             <div className="other-permanent-cluster">
@@ -1100,7 +1108,7 @@ export function PracticeMatch({ onExit, deck }: { onExit: () => void; deck: Save
       </section>
 
       <div className="action-dock" aria-label="Current action">
-        <div className="mana-readout" title={`${readyMana.sources} untapped mana sources; ${manaInPool} floating`}><span className={`mana-orb green ${readyMana.colors.has('G') ? 'available' : ''}`}><Leaf size={12} /></span><span className={`mana-orb red ${readyMana.colors.has('R') ? 'available' : ''}`}><Flame size={12} /></span><b>{readyMana.sources + manaInPool}</b><small>{manaInPool ? `${manaInPool} floating` : 'mana ready'}</small></div>
+        <div className="mana-readout" title={`${readyMana.sources} untapped mana sources; ${manaInPool} floating`}><span className={`mana-orb green ${readyMana.colors.has('G') ? 'available' : ''}`}><Leaf size={12} /></span><span className={`mana-orb red ${readyMana.colors.has('R') ? 'available' : ''}`}><Flame size={12} /></span><b>{readyMana.sources + manaInPool}</b><small className="mana-readout-full">{manaInPool ? `${manaInPool} floating` : 'mana ready'}</small><small className="mana-readout-compact">mana</small></div>
         <button type="button" className="primary-action" disabled={(!playerHasPriority && !(game.phase === 'declare_blockers' && game.combat.defendingPlayerId === HUMAN_PLAYER_ID && !game.combat.blockersDeclared)) || botThinking || !!game.winnerId || game.isDraw} onClick={primaryAction}>
           <span>{actionLabel}</span><ChevronRight size={18} />
         </button>
