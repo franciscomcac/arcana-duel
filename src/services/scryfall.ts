@@ -861,6 +861,9 @@ export type OracleTarget =
   | 'target-player'
   | 'each-player'
   | 'target-creature'
+  /** "target creature an opponent controls" / "target creature that player controls" and similar
+   * phrasings - the reverse of 'controlled-creature'. */
+  | 'opponent-creature'
   | 'target-permanent'
   | 'target-spell'
   | 'target-card'
@@ -979,6 +982,7 @@ function amountFrom(value: string | undefined, fallback: OracleAmount = 1): Orac
 function inferTarget(text: string): OracleTarget {
   const normalized = text.toLocaleLowerCase()
   if (/\bany target\b/.test(normalized)) return 'any-target'
+  if (/\btarget creature (?:an opponent|your opponent|that opponent|another player) controls\b/.test(normalized)) return 'opponent-creature'
   if (/\btarget (?:creature|creature card)(?:\s+or\s+planeswalker)?\b/.test(normalized)) return 'target-creature'
   if (/\btarget (?:permanent|artifact|enchantment|planeswalker|battle|land)(?:\s+or\s+\w+)?\b/.test(normalized)) return 'target-permanent'
   if (/\btarget (?:\w+\s+)*spell\b/.test(normalized)) return 'target-spell'

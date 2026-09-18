@@ -61,6 +61,7 @@ function cloneState(state: GameState): GameState {
       ...card,
       types: [...card.types],
       keywords: [...(card.keywords ?? [])],
+      grantedKeywords: [...(card.grantedKeywords ?? [])],
       counters: { ...card.counters },
       producesMana: card.producesMana ? { ...card.producesMana } : undefined,
       effects: card.effects?.map(cloneEffect),
@@ -146,9 +147,18 @@ function locateCard(state: GameState, cardId: CardInstanceId): { playerId: Playe
   return null
 }
 
+/** Clears attachedToId on anything that was attached to cardId (rule: an Equipment/Aura falls off, unattached
+ * but still on the battlefield, when what it was attached to leaves the battlefield). */
+function detachAnythingAttachedTo(state: GameState, cardId: CardInstanceId): void {
+  for (const other of Object.values(state.cards)) {
+    if (other.attachedToId === cardId) other.attachedToId = undefined
+  }
+}
+
 function moveCard(state: GameState, cardId: CardInstanceId, destinationPlayerId: PlayerId, destination: ZoneName): boolean {
   const location = locateCard(state, cardId)
   if (!location) return false
+  const wasOnBattlefield = location.zone === 'battlefield'
   state.players[location.playerId].zones[location.zone].splice(location.index, 1)
   state.players[destinationPlayerId].zones[destination].push(cardId)
   const card = state.cards[cardId]
@@ -160,6 +170,7 @@ function moveCard(state: GameState, cardId: CardInstanceId, destinationPlayerId:
     card.blocking = null
     card.enteredTurn = state.turnNumber
     card.summoningSick = card.types.includes('creature')
+    card.attachedToId = undefined
   } else {
     card.controllerId = card.ownerId
     card.tapped = false
@@ -169,7 +180,9 @@ function moveCard(state: GameState, cardId: CardInstanceId, destinationPlayerId:
     card.counters = {}
     card.temporaryPower = 0
     card.temporaryToughness = 0
+    card.attachedToId = undefined
   }
+  if (wasOnBattlefield && destination !== 'battlefield') detachAnythingAttachedTo(state, cardId)
   return true
 }
 
@@ -285,11 +298,15 @@ function makeInstance(
     attacking: false,
     blocking: null,
     token,
+    attachedToId: undefined,
+    grantedKeywords: [],
   }
 }
 
 export function hasKeyword(card: CardInstance, keyword: string): boolean {
-  return (card.keywords ?? []).some((value) => value.toLowerCase() === keyword)
+  const normalized = keyword.toLowerCase()
+  if ((card.keywords ?? []).some((value) => value.toLowerCase() === normalized)) return true
+  return (card.grantedKeywords ?? []).some((value) => value.toLowerCase() === normalized)
 }
 
 /** Flying/reach legality only (rule 509.1b) - menace is a property of the whole blocker set, checked separately. */
@@ -306,11 +323,13 @@ export function getToughness(card: CardInstance): number {
   return (card.toughness ?? 0) + (card.counters['+1/+1'] ?? 0) - (card.counters['-1/-1'] ?? 0) + card.temporaryToughness + card.continuousToughness
 }
 
-/** Recomputes simple continuous bonuses that depend on the controller's battlefield. */
+/** Recomputes simple continuous bonuses that depend on the controller's battlefield, plus what any
+ * attached Equipment/Aura is currently granting (see AttachGrant on CardDefinition). */
 export function refreshContinuousEffects(state: GameState): void {
   for (const card of Object.values(state.cards)) {
     card.continuousPower = 0
     card.continuousToughness = 0
+    card.grantedKeywords = []
   }
   const battlefieldCards = Object.values(state.players).flatMap((player) => player.zones.battlefield)
   for (const cardId of battlefieldCards) {
@@ -331,6 +350,21 @@ export function refreshContinuousEffects(state: GameState): void {
     if (controlsRequired) {
       card.continuousPower = powerBonus
       card.continuousToughness = toughnessBonus
+    }
+  }
+  // Equip/Aura attachment grants. Generic over any permanent that carries an attachGrant - not specific
+  // to any one card - so any future "equipped/enchanted creature gets ... and has ..." card just works.
+  for (const cardId of battlefieldCards) {
+    const attachment = state.cards[cardId]
+    if (!attachment?.attachedToId || !attachment.attachGrant) continue
+    const creature = state.cards[attachment.attachedToId]
+    if (!creature || !creature.types.includes('creature')) continue
+    if (!state.players[creature.controllerId]?.zones.battlefield.includes(creature.instanceId)) continue
+    creature.continuousPower += attachment.attachGrant.power ?? 0
+    creature.continuousToughness += attachment.attachGrant.toughness ?? 0
+    for (const keyword of attachment.attachGrant.keywords ?? []) {
+      const normalized = keyword.toLowerCase()
+      if (!creature.grantedKeywords.includes(normalized)) creature.grantedKeywords.push(normalized)
     }
   }
 }
@@ -443,7 +477,19 @@ export function checkAction(state: GameState, action: GameAction): LegalityResul
       if (!source || source.controllerId !== action.playerId || !player.zones.battlefield.includes(action.sourceId)) return { legal: false, reason: 'The ability source is not controlled by the player.' }
       if (action.tapSource && source.tapped) return { legal: false, reason: 'The ability source is tapped.' }
       if (action.tapSource && source.types.includes('creature') && source.summoningSick && !hasKeyword(source, 'haste')) return { legal: false, reason: 'The ability source has summoning sickness.' }
+      if (action.sorcerySpeedOnly && (action.playerId !== state.activePlayerId || !['main1', 'main2'].includes(state.phase) || state.stack.length)) {
+        return { legal: false, reason: 'That ability can only be activated when a sorcery could be cast.' }
+      }
       if (!canPayMana(player.manaPool, action.manaCost)) return { legal: false, reason: 'The player cannot pay the ability cost.' }
+      if (action.discardCount) {
+        if (!action.discardCardIds || action.discardCardIds.length !== action.discardCount) {
+          return { legal: false, reason: `This ability requires discarding ${action.discardCount} card(s).` }
+        }
+        if (new Set(action.discardCardIds).size !== action.discardCardIds.length || action.discardCardIds.some((id) => !player.zones.hand.includes(id))) {
+          return { legal: false, reason: 'That discard selection is invalid.' }
+        }
+      }
+      if (action.payLife !== undefined && player.life < action.payLife) return { legal: false, reason: 'The player cannot pay that much life.' }
       const targetError = validateEffectTargets(state, action.effects, action.targets ?? [], action.playerId)
       return targetError ? { legal: false, reason: targetError } : { legal: true }
     }
@@ -508,6 +554,7 @@ export function matchesTargetRestriction(
   if (restriction === 'permanent') return true
   if (restriction === 'any-target') return card.types.some((type) => ['creature', 'planeswalker', 'battle'].includes(type))
   if (restriction === 'controlled-creature') return card.controllerId === controllerId && card.types.includes('creature')
+  if (restriction === 'opponent-creature') return card.controllerId !== controllerId && card.types.includes('creature')
   if (restriction === 'artifact-or-enchantment') return card.types.includes('artifact') || card.types.includes('enchantment')
   return card.types.includes(restriction)
 }
@@ -542,7 +589,7 @@ function validateEffectTargets(state: GameState, effects: EngineEffect[], target
     }
     if (!matchesTargetRestriction(state, target, effect.target.restriction, controllerId)) return 'That object is not a legal target for this effect.'
     if (effect.type === 'counter_stack_item' && target.kind !== 'stack') return 'A counter effect must target a stack item.'
-    if (['destroy', 'exile', 'return_to_hand', 'tap', 'untap', 'modify_stats', 'add_counter', 'remove_counter'].includes(effect.type) && target.kind !== 'permanent') {
+    if (['destroy', 'exile', 'return_to_hand', 'tap', 'untap', 'modify_stats', 'add_counter', 'remove_counter', 'attach'].includes(effect.type) && target.kind !== 'permanent') {
       return 'That effect must target a permanent.'
     }
     if (effect.type === 'damage' && target.kind === 'stack') return 'Damage cannot target a stack item.'
@@ -640,6 +687,12 @@ export function gameReducer(state: GameState, action: GameAction): ActionResult 
       const source = next.cards[action.sourceId]
       player.manaPool = payMana(player.manaPool, action.manaCost) ?? player.manaPool
       if (action.tapSource) source.tapped = true
+      if (action.payLife) player.life -= action.payLife
+      if (action.discardCardIds?.length) {
+        for (const cardId of action.discardCardIds) moveCard(next, cardId, action.playerId, 'graveyard')
+      }
+      // Sacrifice-as-a-cost happens immediately on activation (rule 602.5g), before the ability resolves.
+      if (action.sacrificeSource) moveCard(next, action.sourceId, source.ownerId, 'graveyard')
       next.consecutivePasses = 0
       if (action.manaAbility) {
         applyEffects(next, action.effects, action.targets ?? [], action.playerId, action.sourceId)
@@ -669,6 +722,20 @@ export function gameReducer(state: GameState, action: GameAction): ActionResult 
         const card = next.cards[id]
         card.attacking = true
         if (!hasKeyword(card, 'vigilance')) card.tapped = true
+      }
+      // Minimal, Embercleave-shaped piece of the eventual general "attacks" trigger system (ROADMAP
+      // Phase 4's oracle-pipeline item, out of scope this pass): equipment flagged
+      // attachOnAttackerDeclared auto-attaches to an attacking creature for free. Multiple simultaneous
+      // triggers aren't modeled - it simply lands on the first declared attacker.
+      if (action.attackerIds.length) {
+        for (const equipmentId of player.zones.battlefield) {
+          const equipment = next.cards[equipmentId]
+          if (!equipment?.attachOnAttackerDeclared) continue
+          if (equipment.attachedToId && action.attackerIds.includes(equipment.attachedToId)) continue
+          const attackerId = action.attackerIds[0]
+          equipment.attachedToId = attackerId
+          addEvent(next, 'attach', `${equipment.name} attached to ${next.cards[attackerId]?.name ?? 'an attacker'} for free.`, { playerId: action.playerId, cardId: equipmentId })
+        }
       }
       next.priorityPlayerId = action.playerId
       next.consecutivePasses = 0
@@ -860,6 +927,11 @@ function applyEffects(
         break
       case 'remove_counter':
         card.counters[effect.counter] = Math.max(0, (card.counters[effect.counter] ?? 0) - effect.amount)
+        break
+      case 'attach':
+        // sourceId is the Equipment/Aura being activated/resolved; card is the target permanent it
+        // attaches onto (already validated as 'controlled-creature' or similar by matchesTargetRestriction).
+        state.cards[sourceId].attachedToId = card.instanceId
         break
       default:
         break

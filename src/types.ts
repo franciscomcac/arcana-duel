@@ -20,6 +20,10 @@ export interface CardData {
   attacking?: boolean
   summoningSick?: boolean
   buff?: number
+  /** Present on Equipment permanents: the mana cost of their equip ability. */
+  equipCost?: string
+  /** The instanceId of the permanent this Equipment/Aura is attached to, if any. */
+  attachedToId?: string
 }
 
 export type Phase = 'untap' | 'draw' | 'main' | 'combat' | 'second' | 'end'

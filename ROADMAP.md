@@ -59,11 +59,17 @@ Cheap, high-visibility, don't require touching the engine.
 
 ## Phase 4 — Engine structural gaps (large lifts, do deliberately)
 
-- [ ] 🔴 No equip/attach/aura subsystem at all — Embercleave currently does
+- [x] 🔴 No equip/attach/aura subsystem at all — Embercleave currently does
       nothing when cast (no +1/+1, no double strike/trample on the actual
       creature, no cost-reduction rider). Needs: attach relation on
       CardInstance, equip-cost activated ability, ETB attach trigger, layer
       application in getPower/getToughness/hasKeyword, detach-on-death.
+      Done, with two deliberate scope cuts: Embercleave's Flash
+      cost-reduction-per-attacker rider was left out (equip cost is a flat
+      {3}), and the "equip for free when a creature attacks" trigger is a
+      narrow, Embercleave-shaped piece of trigger plumbing, not the general
+      attacks-trigger bucket (that's still the next item down). Manual equip
+      works from the UI regardless.
 - [ ] 🔴 Oracle-text→engine pipeline only wires up damage-on-cast and
       enters-the-battlefield effects. Dies/attacks/upkeep/end-step triggers
       and discard/mill/scry/tutor/sacrifice-cost effects are parsed and then
@@ -74,9 +80,9 @@ Cheap, high-visibility, don't require touching the engine.
       Kird-Ape-shaped pattern, not a general static-ability/layers system —
       any other "as long as you control a ___" or anthem-style card is a dead
       letter.
-- [ ] 🟡 No sacrifice/discard/pay-life costs for activated abilities — only
+- [x] 🟡 No sacrifice/discard/pay-life costs for activated abilities — only
       mana + tap.
-- [ ] 🟡 Target-restriction pipeline has no "target creature an opponent
+- [x] 🟡 Target-restriction pipeline has no "target creature an opponent
       controls" kind — only plain "target creature" and "creature you
       control" exist. No live exploit today (no catalog card uses the
       phrasing) but blocks any future removal spell from being safe.

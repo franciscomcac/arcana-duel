@@ -41,7 +41,7 @@ export const catalog: CatalogCard[] = [
   { id: 'lightning-bolt', name: 'Lightning Bolt', image: '/cards/lightning-bolt.jpg', color: 'red', kind: 'instant', cost: 1, mana: 'R', typeLine: 'Instant', rules: 'Deals 3 damage to any target.', rarity: 'Uncommon' },
   { id: 'shock', name: 'Shock', image: '/cards/shock.jpg', color: 'red', kind: 'instant', cost: 1, mana: 'R', typeLine: 'Instant', rules: 'Deals 2 damage to any target.', rarity: 'Common' },
   { id: 'giant-growth', name: 'Giant Growth', image: '/cards/giant-growth.jpg', color: 'green', kind: 'instant', cost: 1, mana: 'G', typeLine: 'Instant', rules: 'Target creature gets +3/+3 until end of turn.', rarity: 'Common' },
-  { id: 'embercleave', name: 'Embercleave', image: '/cards/embercleave.jpg', color: 'red', kind: 'artifact', cost: 6, mana: '4RR', typeLine: 'Legendary Artifact - Equipment', rules: 'Flash. Equipped creature gets +1/+1 and has double strike and trample.', rarity: 'Mythic' },
+  { id: 'embercleave', name: 'Embercleave', image: '/cards/embercleave.jpg', color: 'red', kind: 'artifact', cost: 6, mana: '4RR', typeLine: 'Legendary Artifact - Equipment', rules: 'Flash. Equipped creature gets +1/+1 and has double strike and trample. Equip {3}. Whenever a creature you control attacks, equip Embercleave onto it for free.', rarity: 'Mythic' },
 ]
 
 export type DeckEntry = { cardId: string; quantity: number; card?: CatalogCard }

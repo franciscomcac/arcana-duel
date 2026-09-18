@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { chooseBlocks, chooseBotAction } from './bot'
-import { createGame, gameReducer, getPower, getToughness, reduceActions, runStateBasedActions } from './game'
+import { checkAction, createGame, gameReducer, getPower, getToughness, hasKeyword, reduceActions, runStateBasedActions } from './game'
 import type { CardDefinition, GameState } from './types'
 
 const forest: CardDefinition = {
@@ -438,6 +438,7 @@ describe('discard to maximum hand size', () => {
       attacking: false,
       blocking: null,
       token: false,
+      grantedKeywords: [],
     })
     state.cards.weak = makeCard(weak, 'weak')
     for (const id of handIds.slice(1)) state.cards[id] = makeCard(medium, id)
@@ -662,5 +663,168 @@ describe('bot AI quality', () => {
 
     const decision = chooseBotAction(state, 'a')
     expect(decision?.action).toEqual({ type: 'PLAY_LAND', playerId: 'a', cardId: forestId })
+  })
+})
+
+
+describe('equip/attach subsystem (Phase 4)', () => {
+  it('grants +1/+1, double strike and trample while equipped, and detaches without dangling when the creature dies', () => {
+    const embercleave: CardDefinition = {
+      id: 'embercleave',
+      name: 'Embercleave',
+      types: ['artifact'],
+      manaCost: '{4}{R}{R}',
+      manaValue: 6,
+      equip: { cost: '{3}' },
+      attachGrant: { power: 1, toughness: 1, keywords: ['double strike', 'trample'] },
+    }
+    const state = gameWithDecks([bear, embercleave], [forest], 0)
+    const [bearId, embercleaveId] = state.players.a.zones.library
+    state.players.a.zones.library = []
+    state.players.a.zones.battlefield = [bearId, embercleaveId]
+    state.cards[bearId].summoningSick = false
+    state.phase = 'main1'
+    state.activePlayerId = 'a'
+    state.priorityPlayerId = 'a'
+    state.players.a.manaPool.C = 3
+
+    const equip = gameReducer(state, {
+      type: 'ACTIVATE_ABILITY',
+      playerId: 'a',
+      sourceId: embercleaveId,
+      name: 'Equip Embercleave',
+      effects: [{ type: 'attach', target: { kind: 'target-slot', index: 0, restriction: 'controlled-creature' } }],
+      targets: [{ kind: 'permanent', cardId: bearId }],
+      manaCost: '{3}',
+      sorcerySpeedOnly: true,
+      manaAbility: true,
+    })
+    expect(equip.accepted).toBe(true)
+    const equippedBear = equip.state.cards[bearId]
+    expect(getPower(equippedBear)).toBe(3)
+    expect(getToughness(equippedBear)).toBe(3)
+    expect(hasKeyword(equippedBear, 'double strike')).toBe(true)
+    expect(hasKeyword(equippedBear, 'trample')).toBe(true)
+    expect(equip.state.cards[embercleaveId].attachedToId).toBe(bearId)
+
+    // Equip is sorcery-speed only and requires controlling both the equipment and the target creature.
+    const duringCombat = { ...equip.state, phase: 'declare_attackers' as const, combat: { ...equip.state.combat, attackersDeclared: true } }
+    expect(checkAction(duringCombat, {
+      type: 'ACTIVATE_ABILITY',
+      playerId: 'a',
+      sourceId: embercleaveId,
+      name: 'Equip Embercleave',
+      effects: [{ type: 'attach', target: { kind: 'target-slot', index: 0, restriction: 'controlled-creature' } }],
+      targets: [{ kind: 'permanent', cardId: bearId }],
+      manaCost: '{3}',
+      sorcerySpeedOnly: true,
+    }).legal).toBe(false)
+
+    // Kill the equipped creature: the equipment should fall off but stay on the battlefield, not point
+    // at a card that no longer exists there.
+    const lethal = {
+      ...equip.state,
+      cards: { ...equip.state.cards, [bearId]: { ...equip.state.cards[bearId], damageMarked: 99 } },
+    }
+    const afterDeath = runStateBasedActions(lethal)
+    expect(afterDeath.players.a.zones.graveyard).toContain(bearId)
+    expect(afterDeath.players.a.zones.battlefield).toContain(embercleaveId)
+    expect(afterDeath.cards[embercleaveId].attachedToId).toBeUndefined()
+    expect(getPower(afterDeath.cards[embercleaveId])).toBe(0)
+  })
+})
+
+describe('non-mana activated ability costs (Phase 4)', () => {
+  it('rejects a discard-cost ability when it cannot be paid, and pays it correctly when it can', () => {
+    const source: CardDefinition = { id: 'source', name: 'Source', types: ['artifact'] }
+    const filler: CardDefinition = { id: 'filler', name: 'Filler', types: ['creature'], power: 1, toughness: 1 }
+    const state = gameWithDecks([source, filler], [forest], 0)
+    const [sourceId, fillerId] = state.players.a.zones.library
+    state.players.a.zones.library = []
+    state.players.a.zones.battlefield = [sourceId]
+    state.players.a.zones.hand = [fillerId]
+    state.phase = 'main1'
+
+    const abilityAction = (discardCardIds: string[]) => ({
+      type: 'ACTIVATE_ABILITY' as const,
+      playerId: 'a',
+      sourceId,
+      name: 'Discard a card: gain 1 life',
+      effects: [{ type: 'gain_life' as const, amount: 1 }],
+      discardCount: 1,
+      discardCardIds,
+      manaAbility: true,
+    })
+
+    expect(checkAction(state, abilityAction([])).legal).toBe(false)
+
+    const result = gameReducer(state, abilityAction([fillerId]))
+    expect(result.accepted).toBe(true)
+    expect(result.state.players.a.zones.graveyard).toContain(fillerId)
+    expect(result.state.players.a.zones.hand).toHaveLength(0)
+    expect(result.state.players.a.life).toBe(21)
+  })
+
+  it('rejects a pay-life cost the player cannot afford', () => {
+    const source: CardDefinition = { id: 'source', name: 'Source', types: ['artifact'] }
+    const state = gameWithDecks([source], [forest], 0)
+    const [sourceId] = state.players.a.zones.library
+    state.players.a.zones.library = []
+    state.players.a.zones.battlefield = [sourceId]
+    state.phase = 'main1'
+    state.players.a.life = 2
+
+    const tooExpensive = checkAction(state, {
+      type: 'ACTIVATE_ABILITY',
+      playerId: 'a',
+      sourceId,
+      name: 'Pay 3 life: draw a card',
+      effects: [],
+      payLife: 3,
+    })
+    expect(tooExpensive.legal).toBe(false)
+
+    state.players.a.life = 5
+    const payable = gameReducer(state, {
+      type: 'ACTIVATE_ABILITY',
+      playerId: 'a',
+      sourceId,
+      name: 'Pay 3 life: draw a card',
+      effects: [],
+      payLife: 3,
+    })
+    expect(payable.accepted).toBe(true)
+    expect(payable.state.players.a.life).toBe(2)
+  })
+})
+
+describe('opponent-controlled-creature target restriction (Phase 4)', () => {
+  it('only allows targeting a creature an opponent controls, not one you control yourself', () => {
+    const removal: CardDefinition = {
+      id: 'removal',
+      name: 'Focused Bolt',
+      types: ['instant'],
+      manaCost: '{R}',
+      manaValue: 1,
+      effects: [{ type: 'damage', amount: 3, target: { kind: 'target-slot', index: 0, restriction: 'opponent-creature' } }],
+    }
+    const ownBear: CardDefinition = { id: 'ownBear', name: 'Own Bear', types: ['creature'], power: 2, toughness: 2 }
+    const enemyBear: CardDefinition = { id: 'enemyBear', name: 'Enemy Bear', types: ['creature'], power: 2, toughness: 2 }
+    const state = gameWithDecks([removal, ownBear], [enemyBear], 0)
+    const [removalId, ownBearId] = state.players.a.zones.library
+    const [enemyBearId] = state.players.b.zones.library
+    state.players.a.zones.library = []
+    state.players.b.zones.library = []
+    state.players.a.zones.hand = [removalId]
+    state.players.a.zones.battlefield = [ownBearId]
+    state.players.b.zones.battlefield = [enemyBearId]
+    state.phase = 'main1'
+    state.players.a.manaPool.R = 1
+
+    const illegal = checkAction(state, { type: 'CAST_SPELL', playerId: 'a', cardId: removalId, targets: [{ kind: 'permanent', cardId: ownBearId }] })
+    expect(illegal.legal).toBe(false)
+
+    const legalResult = gameReducer(state, { type: 'CAST_SPELL', playerId: 'a', cardId: removalId, targets: [{ kind: 'permanent', cardId: enemyBearId }] })
+    expect(legalResult.accepted).toBe(true)
   })
 })

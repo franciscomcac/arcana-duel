@@ -92,6 +92,7 @@ function actionNeedsTarget(action: OracleAction): boolean {
     'any-target',
     'target-player',
     'target-creature',
+    'opponent-creature',
     'target-permanent',
     'target-spell',
     'controlled-creature',
@@ -103,6 +104,7 @@ function restrictionForAction(action: OracleAction): TargetRestriction | undefin
   if (action.target === 'target-player') return 'player'
   if (action.target === 'opponent') return 'opponent'
   if (action.target === 'target-creature') return 'creature'
+  if (action.target === 'opponent-creature') return 'opponent-creature'
   if (action.target === 'controlled-creature') return 'controlled-creature'
   if (action.target === 'target-spell') return 'spell'
   if (action.target !== 'target-permanent') return undefined
@@ -179,6 +181,42 @@ function toEngineEffect(action: OracleAction, targetIndex: number | null): Engin
   }
 }
 
+/**
+ * Builds what an Equipment/Aura-style permanent grants to whatever it's attached to, from any parsed
+ * oracle actions targeting 'equipped-creature' (e.g. "Equipped creature gets +1/+1 and has double
+ * strike and trample"). Generic over any card shaped like this - not specific to Embercleave.
+ */
+function attachGrantFromParsedActions(actions: OracleAction[]): { power?: number; toughness?: number; keywords?: string[] } | undefined {
+  const relevant = actions.filter((action) => action.target === 'equipped-creature')
+  if (!relevant.length) return undefined
+  let power: number | undefined
+  let toughness: number | undefined
+  const keywords: string[] = []
+  for (const action of relevant) {
+    if (action.kind === 'modify-stats' && action.duration === 'continuous') {
+      const p = numericAmount(action.power)
+      const t = numericAmount(action.toughness)
+      if (p !== null) power = (power ?? 0) + p
+      if (t !== null) toughness = (toughness ?? 0) + t
+    } else if (action.kind === 'keyword') {
+      keywords.push(normalizeKeyword(action.keyword))
+    }
+  }
+  if (power === undefined && toughness === undefined && !keywords.length) return undefined
+  return { power, toughness, keywords: keywords.length ? keywords : undefined }
+}
+
+/**
+ * Whether this card's oracle text is the Embercleave-shaped "Whenever a creature you control attacks,
+ * equip [this] onto it for free." This is a narrow, one-off pattern match, not a general "attacks"
+ * trigger - see ROADMAP Phase 4 (the oracle-pipeline generalization pass is explicitly out of scope
+ * here; this is deliberately the minimal piece needed for Embercleave's free-equip trigger to work).
+ */
+function hasFreeEquipOnAttackTrigger(rulesText: string): boolean {
+  return /\bwhenever a creature you control attacks\b/i.test(rulesText)
+    && /\bequip\b[^.]*\bonto (?:it|that creature)\b[^.]*\bfor free\b/i.test(rulesText)
+}
+
 export function catalogCardToDefinition(card: CatalogCard): CardDefinition {
   const defaultTrigger = /\b(?:Instant|Sorcery)\b/i.test(card.typeLine) ? 'spell-resolution' : 'static'
   const parsed = parseOracleText(card.rules, card.name, defaultTrigger)
@@ -200,6 +238,11 @@ export function catalogCardToDefinition(card: CatalogCard): CardDefinition {
   const effects = mapActions(parsed.actions.filter((action) => action.trigger === 'spell-resolution'))
   const entersEffects = mapActions(parsed.actions.filter((action) => action.trigger === 'enters'))
 
+  const equipKeywordAction = parsed.actions.find((action): action is Extract<OracleAction, { kind: 'keyword' }> => action.kind === 'keyword' && action.keyword === 'equip')
+  const equip = equipKeywordAction?.value ? { cost: equipKeywordAction.value } : undefined
+  const attachGrant = attachGrantFromParsedActions(parsed.actions)
+  const attachOnAttackerDeclared = hasFreeEquipOnAttackTrigger(card.rules) || undefined
+
   return {
     id: card.id,
     name: card.name,
@@ -216,6 +259,9 @@ export function catalogCardToDefinition(card: CatalogCard): CardDefinition {
     entersEffects,
     imageUri: card.image,
     legendary: /\blegendary\b/i.test(card.typeLine),
+    equip,
+    attachGrant,
+    attachOnAttackerDeclared,
   }
 }
 
@@ -319,6 +365,8 @@ export function engineCardToView(card: CardInstance): CardData {
     attacking: card.attacking,
     summoningSick: card.summoningSick,
     buff: powerAdjustment === toughnessAdjustment && powerAdjustment !== 0 ? powerAdjustment : undefined,
+    equipCost: card.equip?.cost,
+    attachedToId: card.attachedToId,
   }
 }
 
@@ -428,6 +476,40 @@ export function castWithAutomaticMana(state: GameState, playerId: PlayerId, card
   const castResult = gameReducer(current, castAction)
   if (!castResult.accepted) return { state, accepted: false, error: castResult.error, actions: [] }
   return { ...castResult, actions: [...manaActions, castAction] }
+}
+
+/**
+ * Manually equips an Equipment permanent onto a creature the player controls, auto-tapping mana for its
+ * equip cost. Equip is sorcery-speed only and never taps the equipment itself (rule 702.6e); this
+ * resolves immediately rather than going on the stack, a simplification reasonable for an ability with
+ * no meaningful response window in this engine.
+ */
+export function equipWithAutomaticMana(state: GameState, playerId: PlayerId, equipmentId: CardInstanceId, creatureId: CardInstanceId): ArenaDispatchResult {
+  const equipment = state.cards[equipmentId]
+  if (!equipment?.equip) return { state, accepted: false, error: 'That permanent has no equip ability.', actions: [] }
+  const manaActions = findManaActions(state, playerId, equipment.equip.cost)
+  if (!manaActions) return { state, accepted: false, error: `You cannot produce the mana required to equip ${equipment.name}.`, actions: [] }
+
+  let current = state
+  for (const action of manaActions) {
+    const result = gameReducer(current, action)
+    if (!result.accepted) return { state, accepted: false, error: result.error, actions: [] }
+    current = result.state
+  }
+  const equipAction: GameAction = {
+    type: 'ACTIVATE_ABILITY',
+    playerId,
+    sourceId: equipmentId,
+    name: `Equip ${equipment.name}`,
+    effects: [{ type: 'attach', target: { kind: 'target-slot', index: 0, restriction: 'controlled-creature' } }],
+    targets: [{ kind: 'permanent', cardId: creatureId }],
+    manaCost: equipment.equip.cost,
+    sorcerySpeedOnly: true,
+    manaAbility: true,
+  }
+  const equipResult = gameReducer(current, equipAction)
+  if (!equipResult.accepted) return { state, accepted: false, error: equipResult.error, actions: [] }
+  return { ...equipResult, actions: [...manaActions, equipAction] }
 }
 
 export function legalAttackers(state: GameState, playerId: PlayerId): CardInstanceId[] {

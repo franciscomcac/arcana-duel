@@ -71,6 +71,9 @@ export type TargetRestriction =
   | 'opponent'
   | 'creature'
   | 'controlled-creature'
+  /** The reverse of 'controlled-creature': a creature controlled by anyone other than the ability's
+   * controller. Covers oracle phrasings like "target creature an opponent controls". */
+  | 'opponent-creature'
   | 'permanent'
   | 'artifact'
   | 'enchantment'
@@ -104,6 +107,24 @@ export type EngineEffect =
   | { type: 'remove_counter'; counter: string; amount: number; target: EffectTarget }
   | { type: 'counter_stack_item'; target: EffectTarget }
   | { type: 'create_token'; playerId?: PlayerId; token: CardDefinition; amount: number }
+  /** Attaches the ability's source (an Equipment/Aura permanent) onto the target permanent, setting the
+   * target's instanceId as the source's `attachedToId`. Used by the equip subsystem (see CardInstance). */
+  | { type: 'attach'; target: EffectTarget }
+
+/** What an Equipment/Aura-style permanent grants to whatever it's attached to, folded into
+ * getPower/getToughness/hasKeyword generically for any card that carries this - not specific to any one
+ * named card. */
+export interface AttachGrant {
+  power?: number
+  toughness?: number
+  keywords?: string[]
+}
+
+/** An equip ability's cost. Equip never taps the source (rule 702.6e) and is sorcery-speed only; both are
+ * enforced where the equip action is constructed/validated, not stored here. */
+export interface EquipAbility {
+  cost: string
+}
 
 export interface CardDefinition {
   id: string
@@ -122,6 +143,18 @@ export interface CardDefinition {
   imageUri?: string
   /** True for permanents whose type line includes "Legendary" (drives the legend rule). */
   legendary?: boolean
+  /** Present on Equipment-style permanents: the mana cost of their equip ability. */
+  equip?: EquipAbility
+  /** What this permanent grants to whatever it's attached to (only meaningful once attached). */
+  attachGrant?: AttachGrant
+  /**
+   * Minimal, Embercleave-shaped piece of the eventual general trigger system (see ROADMAP Phase 4's
+   * oracle-pipeline item, which is explicitly out of scope for this pass): when true, this permanent
+   * auto-attaches, for free, to a creature its controller declares as an attacker - the mechanism behind
+   * "Whenever a creature you control attacks, equip this onto it for free." This is NOT a general
+   * "attacks" trigger bucket; it only recognizes this one shape of ability.
+   */
+  attachOnAttackerDeclared?: boolean
 }
 
 export interface CardInstance extends CardDefinition {
@@ -140,6 +173,13 @@ export interface CardInstance extends CardDefinition {
   attacking: boolean
   blocking: CardInstanceId | null
   token: boolean
+  /** The permanent this Equipment/Aura is currently attached to, if any. Cleared automatically whenever
+   * the attached permanent leaves the battlefield (see moveCard in game.ts). */
+  attachedToId?: CardInstanceId
+  /** Keywords granted by an attached Equipment/Aura's attachGrant, recomputed every
+   * refreshContinuousEffects pass (mirrors continuousPower/continuousToughness). Checked by hasKeyword()
+   * alongside the card's own static `keywords`. */
+  grantedKeywords: string[]
 }
 
 export interface PlayerZones {
@@ -247,6 +287,16 @@ export type GameAction =
       manaCost?: string
       tapSource?: boolean
       manaAbility?: boolean
+      /** Sacrifices the ability's own source as part of activating it (e.g. "Sacrifice this creature:"). */
+      sacrificeSource?: boolean
+      /** Number of cards that must be discarded to pay this ability's cost (e.g. "Discard a card:"). */
+      discardCount?: number
+      /** The specific hand cards chosen to satisfy `discardCount`. Required when discardCount is set. */
+      discardCardIds?: CardInstanceId[]
+      /** Life paid to activate this ability (e.g. "Pay 3 life:"). */
+      payLife?: number
+      /** True for abilities (like equip) that can only be activated when a sorcery could be cast. */
+      sorcerySpeedOnly?: boolean
     }
   | { type: 'DECLARE_ATTACKERS'; playerId: PlayerId; attackerIds: CardInstanceId[]; defenderId?: PlayerId }
   | { type: 'DECLARE_BLOCKERS'; playerId: PlayerId; assignments: Record<CardInstanceId, CardInstanceId[]> }

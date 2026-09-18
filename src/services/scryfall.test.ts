@@ -52,6 +52,13 @@ describe('parseOracleText', () => {
     expect(parsed.unsupportedClauses).toEqual(["It can't be regenerated."])
   })
 
+  it('recognizes "target creature an opponent controls" as its own restriction, distinct from "you control"', () => {
+    const parsed = parseOracleText('Destroy target creature an opponent controls.')
+    expect(parsed.actions).toEqual(expect.arrayContaining([
+      expect.objectContaining({ kind: 'destroy', target: 'opponent-creature' }),
+    ]))
+  })
+
   it('models source-relative amounts instead of discarding them as unknown text', () => {
     const parsed = parseOracleText('Ashling deals damage equal to its power to any target.', 'Ashling')
     expect(parsed.actions).toEqual(expect.arrayContaining([

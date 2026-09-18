@@ -49,6 +49,7 @@ import {
   castWithAutomaticMana,
   createPracticeGame,
   engineCardToView,
+  equipWithAutomaticMana,
   eventsToLog,
   findManaActions,
   HUMAN_PLAYER_ID,
@@ -288,6 +289,9 @@ export function PracticeMatch({ onExit, deck }: { onExit: () => void; deck: Save
   const [inspectedId, setInspectedId] = useState<string | null>(() => game.players[HUMAN_PLAYER_ID].zones.hand[0] ?? null)
   const [targetingId, setTargetingId] = useState<string | null>(null)
   const [chosenTargets, setChosenTargets] = useState<TargetRef[]>([])
+  // Manual-equip flow: set to an unattached equipment's uid while the player is choosing a creature
+  // they control to attach it to (see item 1 of ROADMAP Phase 4's equip/attach subsystem).
+  const [equippingId, setEquippingId] = useState<string | null>(null)
   const [attackerSelection, setAttackerSelection] = useState<Set<CardInstanceId>>(new Set())
   const [blockingAttackerId, setBlockingAttackerId] = useState<string | null>(null)
   const [blockAssignments, setBlockAssignments] = useState<Record<string, string[]>>({})
@@ -753,8 +757,29 @@ export function PracticeMatch({ onExit, deck }: { onExit: () => void; deck: Save
     else setChosenTargets(nextTargets)
   }
 
+  const beginEquip = (equipmentId: string) => {
+    setEquippingId(equipmentId)
+    setToast('Choose a creature you control to equip')
+  }
+
+  const completeEquip = (creatureId: string) => {
+    if (!equippingId) return
+    const result = equipWithAutomaticMana(game, HUMAN_PLAYER_ID, equippingId, creatureId)
+    setEquippingId(null)
+    if (!result.accepted) {
+      setToast(result.error ?? 'That equip failed.')
+      return
+    }
+    setGame(result.state)
+    setToast('Equipped.')
+  }
+
   const handleFieldCard = (card: CardData, owner: 'self' | 'opponent') => {
     setInspectedId(card.uid)
+    if (equippingId) {
+      if (owner === 'self' && card.uid !== equippingId && card.kind === 'creature') completeEquip(card.uid)
+      return
+    }
     if (orderingAttackerId) {
       if (owner === 'opponent' && orderingBlockerIds.includes(card.uid) && !damageOrderSelection.includes(card.uid)) {
         setDamageOrderSelection((current) => [...current, card.uid])
@@ -763,6 +788,10 @@ export function PracticeMatch({ onExit, deck }: { onExit: () => void; deck: Save
     }
     if (targetingId) {
       chooseTarget({ kind: 'permanent', cardId: card.uid })
+      return
+    }
+    if (owner === 'self' && card.equipCost && !card.attachedToId && !selectedId) {
+      beginEquip(card.uid)
       return
     }
     if (game.phase === 'declare_attackers' && playerTurn && !game.combat.attackersDeclared && owner === 'self' && legalAttackerIds.has(card.uid)) {
@@ -841,6 +870,11 @@ export function PracticeMatch({ onExit, deck }: { onExit: () => void; deck: Save
       if (discardSelection.size === pendingDiscardCount) confirmDiscard()
       return
     }
+    if (equippingId) {
+      setEquippingId(null)
+      setToast('Equip cancelled')
+      return
+    }
     if (targetingId) {
       setTargetingId(null)
       setChosenTargets([])
@@ -867,6 +901,7 @@ export function PracticeMatch({ onExit, deck }: { onExit: () => void; deck: Save
     if (game.isDraw) return 'Draw game'
     if (pendingDiscardCount > 0) return `Discard (${discardSelection.size}/${pendingDiscardCount})`
     if (orderingAttackerId) return 'Choose damage order'
+    if (equippingId) return 'Cancel equip'
     if (targetingId) return 'Cancel target'
     if (selected) return selected.types.includes('land') ? 'Play land' : `Cast · ${selected.manaCost ?? selected.manaValue ?? 0}`
     if (game.phase === 'declare_attackers' && playerTurn && !game.combat.attackersDeclared) return `Declare attackers (${attackerSelection.size})`
@@ -879,7 +914,7 @@ export function PracticeMatch({ onExit, deck }: { onExit: () => void; deck: Save
     if (playerTurn && game.phase === 'main1') return 'To Combat'
     if (playerTurn && game.phase === 'main2') return 'End Turn'
     return 'Next'
-  }, [attackerSelection.size, blockAssignments, botThinking, discardSelection.size, game, orderingAttackerId, pendingDiscardCount, playerHasPriority, playerTurn, selected, targetingId])
+  }, [attackerSelection.size, blockAssignments, botThinking, discardSelection.size, equippingId, game, orderingAttackerId, pendingDiscardCount, playerHasPriority, playerTurn, selected, targetingId])
 
   const canSelectHandCard = (cardId: string): boolean => handCardAvailability(cardId).playable
 
@@ -890,6 +925,7 @@ export function PracticeMatch({ onExit, deck }: { onExit: () => void; deck: Save
     setInspectedId(next.players[HUMAN_PLAYER_ID].zones.hand[0] ?? null)
     setTargetingId(null)
     setChosenTargets([])
+    setEquippingId(null)
     setAttackerSelection(new Set())
     setBlockingAttackerId(null)
     setBlockAssignments({})
